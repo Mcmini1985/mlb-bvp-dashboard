@@ -1,6 +1,5 @@
 """
-MLB Daily BvP Dashboard - Standalone (ALL Batters)
-Pulls fresh data directly from MLB API — shows every batter with career BvP stats.
+MLB Daily BvP Dashboard - Standalone (ALL Batters - No Limit)
 """
 import streamlit as st
 import pandas as pd
@@ -16,7 +15,7 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
-MAX_BATTERS_PER_TEAM = 25   # Captures nearly every relevant batter
+MAX_BATTERS_PER_TEAM = None   # ←←← No limit (uses full active roster)
 
 def api_get(path, **params):
     for attempt in range(1, 4):
@@ -56,7 +55,7 @@ def fetch_roster_batters(team_id):
         if p.get("position", {}).get("type", "") != "Pitcher":
             person = p.get("person", {})
             batters.append((person.get("fullName", "?"), person.get("id")))
-    return batters[:MAX_BATTERS_PER_TEAM]
+    return batters   # ← No slicing = ALL batters
 
 def fetch_confirmed_lineup(game, side):
     order = game.get("lineups", {}).get(f"{side}Players", [])
@@ -81,7 +80,7 @@ def fetch_bvp(batter_id, pitcher_id):
             }
     return None
 
-# ── Generate full DataFrame (ALL batters) ───────────────────────────────────
+# ── Generate DataFrame (ALL batters) ────────────────────────────────────────
 @st.cache_data(ttl=300)
 def generate_bvp_dataframe():
     with st.spinner("Fetching ALL BvP matchups from MLB API..."):
@@ -172,4 +171,4 @@ styled = data.style\
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 
-st.success("✅ Showing ALL batters with career BvP stats (no limit)")
+st.success(f"✅ Showing ALL batters with career BvP stats ({len(data)} rows)")
