@@ -1,5 +1,5 @@
 """
-MLB Daily BvP Dashboard - Standalone (ALL Batters - No Limit)
+MLB Daily BvP Dashboard - Stable Version (All Batters)
 """
 import streamlit as st
 import pandas as pd
@@ -15,7 +15,7 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
-MAX_BATTERS_PER_TEAM = None   # ←←← No limit (uses full active roster)
+MIN_AB = 5   # Only show batters with at least this many career at-bats
 
 def api_get(path, **params):
     for attempt in range(1, 4):
@@ -55,11 +55,7 @@ def fetch_roster_batters(team_id):
         if p.get("position", {}).get("type", "") != "Pitcher":
             person = p.get("person", {})
             batters.append((person.get("fullName", "?"), person.get("id")))
-    return batters   # ← No slicing = ALL batters
-
-def fetch_confirmed_lineup(game, side):
-    order = game.get("lineups", {}).get(f"{side}Players", [])
-    return [(p.get("fullName", "?"), p.get("id")) for p in order]
+    return batters
 
 def fetch_bvp(batter_id, pitcher_id):
     data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer", opposingPlayerId=pitcher_id,
@@ -80,8 +76,8 @@ def fetch_bvp(batter_id, pitcher_id):
             }
     return None
 
-# ── Generate DataFrame (ALL batters) ────────────────────────────────────────
-@st.cache_data(ttl=300)
+# ── Generate DataFrame ───────────────────────────────────────────────────────
+@st.cache_data(ttl=600)   # Cache for 10 minutes
 def generate_bvp_dataframe():
     with st.spinner("Fetching ALL BvP matchups from MLB API..."):
         game_date = date.today().isoformat()
@@ -109,15 +105,13 @@ def generate_bvp_dataframe():
             for bat_team, bat_team_id, sp_name, sp_id, pit_team, side_key in sides:
                 if not sp_id:
                     continue
-                confirmed = fetch_confirmed_lineup(g, side_key)
-                batters = confirmed if confirmed else fetch_roster_batters(bat_team_id)
-                lineup_tag = "✓ Confirmed" if confirmed else "Projected"
+                batters = fetch_roster_batters(bat_team_id)   # Always full roster
 
                 for bname, bid in batters:
                     if not bid:
                         continue
                     bvp = fetch_bvp(bid, sp_id)
-                    if not bvp:
+                    if not bvp or bvp["ab"] < MIN_AB:
                         continue
                     rows.append({
                         "Matchup": label,
@@ -129,12 +123,15 @@ def generate_bvp_dataframe():
                         "RBI": bvp["rbi"], "BB": bvp["bb"], "SO": bvp["so"],
                         "AVG": bvp["avg"], "OBP": bvp["obp"],
                         "SLG": bvp["slg"], "OPS": bvp["ops"],
-                        "Lineup?": lineup_tag
+                        "Lineup?": "Projected"
                     })
                 count += 1
                 progress_bar.progress(min(count / total, 1.0))
 
         df = pd.DataFrame(rows)
+        # Sort by OPS descending so order is always consistent
+        if not df.empty:
+            df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
 data = generate_bvp_dataframe()
@@ -171,4 +168,6 @@ styled = data.style\
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 
-st.success(f"✅ Showing ALL batters with career BvP stats ({len(data)} rows)")
+st.success(f"✅ Showing {len(data)} stable BvP matchups (minimum {MIN_AB} career AB)")
+
+st.caption("Data is now sorted by OPS descending and uses full rosters for consistency.")
