@@ -1,5 +1,6 @@
 """
-MLB Daily BvP Dashboard - All Batters + Last 20 AB Hit & Hitting Streak
+MLB Daily BvP Dashboard - All Batters + Advanced Stats
+Default filter: AB > 20 and AVG > .250
 """
 import streamlit as st
 import pandas as pd
@@ -16,12 +17,41 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
 
+@st.cache_data(ttl=86400)
+def get_player_handedness(player_id):
+    data = api_get(f"/people/{player_id}")
+    person = data.get("people", [{}])[0]
+    bats = person.get("bats", "Unknown")
+    throws = person.get("throws", "Unknown")
+    batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats, bats)
+    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws, throws)
+    return batter_hand, pitcher_hand
+
+@st.cache_data(ttl=86400)
+def get_batter_vs_hand(batter_id):
+    """Return career AVG/OPS vs LHP and vs RHP"""
+    vs_l = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="L")
+    vs_r = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="R")
+    
+    l_avg = l_ops = ".000"
+    r_avg = r_ops = ".000"
+
+    for stat in vs_l.get("stats", []):
+        for split in stat.get("splits", []):
+            s = split.get("stat", {})
+            l_avg = s.get("avg", ".000")
+            l_ops = s.get("ops", ".000")
+    for stat in vs_r.get("stats", []):
+        for split in stat.get("splits", []):
+            s = split.get("stat", {})
+            r_avg = s.get("avg", ".000")
+            r_ops = s.get("ops", ".000")
+    return l_avg, l_ops, r_avg, r_ops
+
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
-    """Return Last 20 AB Hit (e.g. '7-20') and Current Hitting Streak"""
     season = date.today().year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
-    
     last_20_hits = 0
     last_20_ab = 0
     streak = 0
@@ -31,7 +61,6 @@ def get_recent_batter_stats(batter_id):
     for sg in data.get("stats", []):
         games.extend(sg.get("splits", []))
 
-    # Sort by date descending (most recent first)
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
 
     for game in games:
@@ -39,14 +68,12 @@ def get_recent_batter_stats(batter_id):
         ab = stat.get("atBats", 0)
         hits = stat.get("hits", 0)
 
-        # Last 20 AB calculation
         if last_20_ab < 20:
             needed = 20 - last_20_ab
             add_ab = min(ab, needed)
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Hitting streak calculation
         if hits > 0:
             current_streak += 1
         else:
@@ -163,20 +190,23 @@ def generate_bvp_dataframe():
                     if not bvp:
                         continue
                     
-                    # Get recent stats
                     last_20_ab, streak = get_recent_batter_stats(bid)
+                    batter_hand, pitcher_hand = get_player_handedness(bid)
+                    l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
                     
                     key = (bid, sp_id)
                     matchup_dict[key] = {
                         "Matchup": label,
                         "Batter": bname,
-                        "Batter Hand": get_player_handedness(bid)[0],
+                        "Batter Hand": batter_hand,
                         "Batter Team": bat_team,
                         "Opposing Pitcher": sp_name,
-                        "Pitcher Hand": get_player_handedness(sp_id)[1],
+                        "Pitcher Hand": pitcher_hand,
                         "Pitcher Team": pit_team,
                         "Last 20 AB": last_20_ab,
                         "Hitting Streak": streak,
+                        "Batter vs LHP": f"{l_avg} / {l_ops}",
+                        "Batter vs RHP": f"{r_avg} / {r_ops}",
                         "AB": bvp["ab"], "H": bvp["h"], "HR": bvp["hr"],
                         "RBI": bvp["rbi"], "BB": bvp["bb"], "SO": bvp["so"],
                         "AVG": bvp["avg"], "OBP": bvp["obp"],
@@ -188,18 +218,10 @@ def generate_bvp_dataframe():
 
         df = pd.DataFrame(matchup_dict.values())
         if not df.empty:
+            df["AVG"] = pd.to_numeric(df["AVG"], errors="coerce")
+            df = df[(df["AB"] > 20) & (df["AVG"] > 0.250)]
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
-
-@st.cache_data(ttl=86400)
-def get_player_handedness(player_id):
-    data = api_get(f"/people/{player_id}")
-    person = data.get("people", [{}])[0]
-    bats = person.get("bats", "Unknown")
-    throws = person.get("throws", "Unknown")
-    batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats, bats)
-    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws, throws)
-    return batter_hand, pitcher_hand
 
 data = generate_bvp_dataframe()
 
@@ -211,7 +233,6 @@ st.sidebar.header("🔎 Filters")
 
 batter_search = st.sidebar.text_input("Search Batter", "")
 
-# Team and Hand filters
 batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
 pitcher_teams = sorted(data["Pitcher Team"].unique()) if not data.empty else []
 batter_hands = sorted(data["Batter Hand"].unique()) if not data.empty else []
@@ -266,4 +287,4 @@ styled = filtered_data.style\
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 
-st.success(f"✅ Showing {len(filtered_data)} matchups")
+st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 20 and AVG > .250)")
