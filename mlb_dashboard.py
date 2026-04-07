@@ -1,6 +1,6 @@
 """
 MLB Daily BvP Dashboard - Clean & Stable Version
-Default filter: AB > 20 and AVG > .250
+Default filter: AB > 10 and AVG > .250
 """
 import streamlit as st
 import pandas as pd
@@ -16,12 +16,24 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
 
+def api_get(path, **params):
+    for attempt in range(1, 4):
+        try:
+            r = requests.get(BASE + path, params=params, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            if attempt == 3:
+                return {}
+            time.sleep(2 ** attempt)
+    return {}
+
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
     data = api_get(f"/people/{player_id}")
     person = data.get("people", [{}])[0]
-    bats = person.get("bats", "")
-    throws = person.get("throws", "")
+    bats = person.get("batSide", {}).get("code", "") or person.get("bats", "")
+    throws = person.get("pitchHand", {}).get("code", "") or person.get("throws", "")
     batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats.upper(), "Unknown")
     pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
     return batter_hand, pitcher_hand
@@ -79,18 +91,6 @@ def get_recent_batter_stats(batter_id):
 
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
     return last_20_str, current_streak
-
-def api_get(path, **params):
-    for attempt in range(1, 4):
-        try:
-            r = requests.get(BASE + path, params=params, timeout=30)
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            if attempt == 3:
-                return {}
-            time.sleep(2 ** attempt)
-    return {}
 
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
@@ -212,7 +212,7 @@ def generate_bvp_dataframe():
         df = pd.DataFrame(matchup_dict.values())
         if not df.empty:
             df["AVG"] = pd.to_numeric(df["AVG"], errors="coerce")
-            df = df[(df["AB"] > 20) & (df["AVG"] > 0.250)]
+            df = df[(df["AB"] > 10) & (df["AVG"] > 0.250)]
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
@@ -280,4 +280,4 @@ styled = filtered_data.style\
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 
-st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 20 and AVG > .250)")
+st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250)")
