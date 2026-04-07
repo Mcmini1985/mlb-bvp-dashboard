@@ -1,12 +1,11 @@
 """
-MLB Daily BvP Dashboard - All Batters + Advanced Stats
+MLB Daily BvP Dashboard - All Batters + Handedness + Advanced Stats
 Default filter: AB > 20 and AVG > .250
 """
 import streamlit as st
 import pandas as pd
 import requests
 from datetime import date, datetime
-from io import BytesIO
 import time
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
@@ -29,13 +28,11 @@ def get_player_handedness(player_id):
 
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
-    """Return career AVG/OPS vs LHP and vs RHP"""
     vs_l = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="L")
     vs_r = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="R")
     
     l_avg = l_ops = ".000"
     r_avg = r_ops = ".000"
-
     for stat in vs_l.get("stats", []):
         for split in stat.get("splits", []):
             s = split.get("stat", {})
