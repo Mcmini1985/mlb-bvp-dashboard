@@ -51,8 +51,6 @@ def get_recent_batter_stats(batter_id):
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
     last_20_hits = 0
     last_20_ab = 0
-    streak = 0
-    current_streak = 0
 
     games = []
     for sg in data.get("stats", []):
@@ -60,6 +58,7 @@ def get_recent_batter_stats(batter_id):
 
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
 
+    current_streak = 0
     for game in games:
         stat = game.get("stat", {})
         ab = stat.get("atBats", 0)
@@ -71,14 +70,15 @@ def get_recent_batter_stats(batter_id):
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        if hits > 0:
-            current_streak += 1
-        else:
-            current_streak = 0
-        streak = max(streak, current_streak)
+        # Streak: walk through newest-first, break at first hitless game
+        if ab > 0:  # only count games with plate appearances
+            if hits > 0:
+                current_streak += 1
+            else:
+                break
 
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
-    return last_20_str, streak
+    return last_20_str, current_streak
 
 def api_get(path, **params):
     for attempt in range(1, 4):
