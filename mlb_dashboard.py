@@ -1,5 +1,5 @@
 """
-MLB Daily BvP Dashboard - Public Web App (Fixed for Streamlit Cloud)
+MLB Daily BvP Dashboard - Public Web App (Updated Version)
 """
 import streamlit as st
 import pandas as pd
@@ -12,7 +12,7 @@ st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
 st.title("⚾ MLB Daily Batter vs. Pitcher Matchups")
 st.caption(f"Top 30 BvP — Updated {date.today().strftime('%B %d, %Y')}")
 
-# ── Your public GitHub Excel file ───────────────────────────────────────────
+# Your public GitHub Excel file
 EXCEL_URL = "https://raw.githubusercontent.com/Mcmini1985/mlb-bvp-dashboard/main/Top_30_batter.xlsx"
 
 @st.cache_data(ttl=300)   # Refresh every 5 minutes
@@ -24,7 +24,7 @@ def load_data():
         
         df_dict = pd.read_excel(excel_data, sheet_name=None)
         
-        # Find the correct sheet
+        # Automatically find the BvP sheet
         sheet_name = None
         for name in df_dict.keys():
             if "BvP" in name or "Matchup" in name:
@@ -38,6 +38,7 @@ def load_data():
         return data
     except Exception as e:
         st.error(f"❌ Could not load Excel file from GitHub:\n{e}")
+        st.info("Tip: Make sure requirements.txt contains 'openpyxl' and you have re-deployed the app.")
         st.stop()
 
 data = load_data()
@@ -48,7 +49,7 @@ with col1:
     st.subheader("Top 30 Batter vs. Pitcher Matchups")
 with col2:
     if st.button("🔄 Refresh Data Now", type="primary"):
-        with st.spinner("Fetching latest data..."):
+        with st.spinner("Fetching latest data from GitHub..."):
             st.cache_data.clear()
             st.rerun()
 
@@ -80,12 +81,13 @@ st.dataframe(
     height=800
 )
 
-# Sidebar
+# Sidebar information
 with st.sidebar:
-    st.header("How to update")
-    st.write("1. Run your Python generator (`mlb_daily_bvp.py`) on your computer.")
-    st.write("2. Upload the new `Top_30_batter.xlsx` to your GitHub repository.")
-    st.write("3. Click the Refresh button above.")
-    st.caption("Dashboard by MinhPC • Public link ready to share")
+    st.header("How to Update")
+    st.write("1. Run your Python generator script (`mlb_daily_bvp.py`)")
+    st.write("2. Upload the new `Top_30_batter.xlsx` to your GitHub repository")
+    st.write("3. Click the **Refresh Data Now** button above")
+    st.divider()
+    st.caption("Dashboard built for MinhPC\nPublic link ready to share with friends")
 
-st.success("✅ Dashboard is now live and working on Streamlit Cloud!")
+st.success("✅ Dashboard is live and working!")
