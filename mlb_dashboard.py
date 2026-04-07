@@ -1,6 +1,5 @@
 """
-MLB Daily BvP Dashboard - All Batters with Default Filter
-Only shows hitters with AB > 10 and AVG > 0.250
+MLB Daily BvP Dashboard - All Batters + Handedness
 """
 import streamlit as st
 import pandas as pd
@@ -32,6 +31,17 @@ def api_get(path, **params):
             st.warning(f"API error: {path} → {e}")
             return {}
     return {}
+
+@st.cache_data(ttl=86400)   # Cache for 24 hours (handedness rarely changes)
+def get_player_handedness(player_id):
+    data = api_get(f"/people/{player_id}")
+    person = data.get("people", [{}])[0]
+    bats = person.get("bats", "Unknown")
+    throws = person.get("throws", "Unknown")
+    # Friendly names
+    batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats, bats)
+    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws, throws)
+    return batter_hand, pitcher_hand
 
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
@@ -123,12 +133,18 @@ def generate_bvp_dataframe():
                     bvp = fetch_bvp(bid, sp_id)
                     if not bvp:
                         continue
+                    
+                    # Get handedness
+                    batter_hand, pitcher_hand = get_player_handedness(bid), get_player_handedness(sp_id)[1]
+                    
                     key = (bid, sp_id)
                     matchup_dict[key] = {
                         "Matchup": label,
                         "Batter": bname,
+                        "Batter Hand": batter_hand,
                         "Batter Team": bat_team,
                         "Opposing Pitcher": sp_name,
+                        "Pitcher Hand": pitcher_hand,
                         "Pitcher Team": pit_team,
                         "AB": bvp["ab"], "H": bvp["h"], "HR": bvp["hr"],
                         "RBI": bvp["rbi"], "BB": bvp["bb"], "SO": bvp["so"],
@@ -141,9 +157,6 @@ def generate_bvp_dataframe():
 
         df = pd.DataFrame(matchup_dict.values())
         if not df.empty:
-            # Apply requested default filter
-            df["AVG"] = pd.to_numeric(df["AVG"], errors="coerce")
-            df = df[(df["AB"] > 10) & (df["AVG"] > 0.250)]
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
@@ -152,6 +165,38 @@ data = generate_bvp_dataframe()
 if 'last_fetched' in st.session_state:
     st.info(f"📅 Data last fetched at: **{st.session_state['last_fetched']}**")
 
+# ── FILTERS ─────────────────────────────────────────────────────────────────
+st.sidebar.header("🔎 Filters")
+
+batter_search = st.sidebar.text_input("Search Batter", "")
+
+batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
+pitcher_teams = sorted(data["Pitcher Team"].unique()) if not data.empty else []
+
+selected_batter_team = st.sidebar.multiselect("Batter Team", options=batter_teams, default=[])
+selected_pitcher_team = st.sidebar.multiselect("Pitcher Team", options=pitcher_teams, default=[])
+
+batter_hands = sorted(data["Batter Hand"].unique()) if not data.empty else []
+pitcher_hands = sorted(data["Pitcher Hand"].unique()) if not data.empty else []
+
+selected_batter_hand = st.sidebar.multiselect("Batter Hand", options=batter_hands, default=[])
+selected_pitcher_hand = st.sidebar.multiselect("Pitcher Hand", options=pitcher_hands, default=[])
+
+# Apply filters
+filtered_data = data.copy()
+
+if batter_search:
+    filtered_data = filtered_data[filtered_data["Batter"].str.contains(batter_search, case=False, na=False)]
+if selected_batter_team:
+    filtered_data = filtered_data[filtered_data["Batter Team"].isin(selected_batter_team)]
+if selected_pitcher_team:
+    filtered_data = filtered_data[filtered_data["Pitcher Team"].isin(selected_pitcher_team)]
+if selected_batter_hand:
+    filtered_data = filtered_data[filtered_data["Batter Hand"].isin(selected_batter_hand)]
+if selected_pitcher_hand:
+    filtered_data = filtered_data[filtered_data["Pitcher Hand"].isin(selected_pitcher_hand)]
+
+# ── Display ─────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("All Batter vs. Pitcher Matchups")
@@ -173,7 +218,7 @@ def color_ops(val):
     except:
         return ""
 
-styled = data.style\
+styled = filtered_data.style\
     .map(color_ops, subset=["OPS"])\
     .set_properties(**{'text-align': 'center'})\
     .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'), 
@@ -182,4 +227,4 @@ styled = data.style\
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 
-st.success(f"✅ Showing {len(data)} matchups (AB > 10 and AVG > .250)")
+st.success(f"✅ Showing {len(filtered_data)} matchups")
