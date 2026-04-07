@@ -40,21 +40,25 @@ def get_player_handedness(player_id):
 
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
-    vs_l = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="L")
-    vs_r = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="R")
-    
+    data = api_get(
+        f"/people/{batter_id}/stats",
+        stats="careerStatSplits",
+        group="hitting",
+        sitCodes="vl,vr",
+        sportId=1
+    )
     l_avg = l_ops = ".000"
     r_avg = r_ops = ".000"
-    for stat in vs_l.get("stats", []):
+    for stat in data.get("stats", []):
         for split in stat.get("splits", []):
+            hand = split.get("split", {}).get("code", "")
             s = split.get("stat", {})
-            l_avg = s.get("avg", ".000")
-            l_ops = s.get("ops", ".000")
-    for stat in vs_r.get("stats", []):
-        for split in stat.get("splits", []):
-            s = split.get("stat", {})
-            r_avg = s.get("avg", ".000")
-            r_ops = s.get("ops", ".000")
+            if hand == "vl":
+                l_avg = s.get("avg", ".000")
+                l_ops = s.get("ops", ".000")
+            elif hand == "vr":
+                r_avg = s.get("avg", ".000")
+                r_ops = s.get("ops", ".000")
     return l_avg, l_ops, r_avg, r_ops
 
 @st.cache_data(ttl=3600)
