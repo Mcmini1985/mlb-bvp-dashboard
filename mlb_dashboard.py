@@ -16,18 +16,6 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
 
-def api_get(path, **params):
-    for attempt in range(1, 4):
-        try:
-            r = requests.get(BASE + path, params=params, timeout=30)
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            if attempt == 3:
-                return {}
-            time.sleep(2 ** attempt)
-    return {}
-
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
     data = api_get(f"/people/{player_id}")
@@ -40,61 +28,75 @@ def get_player_handedness(player_id):
 
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
-    data = api_get(
-        f"/people/{batter_id}/stats",
-        stats="careerStatSplits",
-        group="hitting",
-        sitCodes="vl,vr",
-        sportId=1
-    )
+    vs_l = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="L")
+    vs_r = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="R")
+    
     l_avg = l_ops = ".000"
     r_avg = r_ops = ".000"
-    for stat in data.get("stats", []):
+    for stat in vs_l.get("stats", []):
         for split in stat.get("splits", []):
-            hand = split.get("split", {}).get("code", "")
             s = split.get("stat", {})
-            if hand == "vl":
-                l_avg = s.get("avg", ".000")
-                l_ops = s.get("ops", ".000")
-            elif hand == "vr":
-                r_avg = s.get("avg", ".000")
-                r_ops = s.get("ops", ".000")
+            l_avg = s.get("avg", ".000")
+            l_ops = s.get("ops", ".000")
+    for stat in vs_r.get("stats", []):
+        for split in stat.get("splits", []):
+            s = split.get("stat", {})
+            r_avg = s.get("avg", ".000")
+            r_ops = s.get("ops", ".000")
     return l_avg, l_ops, r_avg, r_ops
 
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
+    """Fixed: correctly accumulates the most recent 20 at-bats"""
     season = date.today().year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
+    
     last_20_hits = 0
     last_20_ab = 0
+    streak = 0
+    current_streak = 0
 
     games = []
     for sg in data.get("stats", []):
         games.extend(sg.get("splits", []))
 
+    # Most recent games first
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
 
-    current_streak = 0
     for game in games:
         stat = game.get("stat", {})
         ab = stat.get("atBats", 0)
         hits = stat.get("hits", 0)
 
+        # Accumulate until we have at least 20 AB
         if last_20_ab < 20:
             needed = 20 - last_20_ab
             add_ab = min(ab, needed)
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Streak: walk through newest-first, break at first hitless game
-        if ab > 0:  # only count games with plate appearances
+        # Hitting streak (only count games with plate appearances)
+        if ab > 0:
             if hits > 0:
                 current_streak += 1
             else:
-                break
+                current_streak = 0
+            streak = max(streak, current_streak)
 
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
-    return last_20_str, current_streak
+    return last_20_str, streak
+
+def api_get(path, **params):
+    for attempt in range(1, 4):
+        try:
+            r = requests.get(BASE + path, params=params, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            if attempt == 3:
+                return {}
+            time.sleep(2 ** attempt)
+    return {}
 
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
@@ -278,8 +280,8 @@ def color_ops(val):
 styled = filtered_data.style\
     .map(color_ops, subset=["OPS"])\
     .set_properties(**{'text-align': 'center'})\
-    .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'), 
-                                                    ('color', 'white'), 
+    .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'),
+                                                    ('color', 'white'),
                                                     ('font-weight', 'bold')]}])
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
