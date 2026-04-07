@@ -1,5 +1,5 @@
 """
-MLB Daily BvP Dashboard - Stable Version (All Batters)
+MLB Daily BvP Dashboard - Stable Version (Fixed Inconsistent Stats)
 """
 import streamlit as st
 import pandas as pd
@@ -15,7 +15,6 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
-MIN_AB = 5   # Only show batters with at least this many career at-bats
 
 def api_get(path, **params):
     for attempt in range(1, 4):
@@ -58,27 +57,41 @@ def fetch_roster_batters(team_id):
     return batters
 
 def fetch_bvp(batter_id, pitcher_id):
+    """Improved: selects the split with the highest AB count (career split)"""
     data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer", opposingPlayerId=pitcher_id,
                    sportId=1, group="hitting")
-    for sg in data.get("stats", []):
-        splits = sg.get("splits", [])
-        if splits:
-            s = splits[0].get("stat", {})
-            ab = s.get("atBats", 0)
-            if ab == 0:
-                return None
-            return {
-                "ab": ab, "h": s.get("hits", 0), "hr": s.get("homeRuns", 0),
-                "rbi": s.get("rbi", 0), "bb": s.get("baseOnBalls", 0),
-                "so": s.get("strikeOuts", 0),
-                "avg": s.get("avg", ".000"), "obp": s.get("obp", ".000"),
-                "slg": s.get("slg", ".000"), "ops": s.get("ops", ".000")
-            }
-    return None
+    best_split = None
+    max_ab = -1
 
-# ── Generate DataFrame ───────────────────────────────────────────────────────
-@st.cache_data(ttl=600)   # Cache for 10 minutes
+    for sg in data.get("stats", []):
+        for split in sg.get("splits", []):
+            stat = split.get("stat", {})
+            ab = stat.get("atBats", 0)
+            if ab > max_ab:
+                max_ab = ab
+                best_split = stat
+
+    if best_split is None or max_ab == 0:
+        return None
+
+    return {
+        "ab": best_split.get("atBats", 0),
+        "h": best_split.get("hits", 0),
+        "hr": best_split.get("homeRuns", 0),
+        "rbi": best_split.get("rbi", 0),
+        "bb": best_split.get("baseOnBalls", 0),
+        "so": best_split.get("strikeOuts", 0),
+        "avg": best_split.get("avg", ".000"),
+        "obp": best_split.get("obp", ".000"),
+        "slg": best_split.get("slg", ".000"),
+        "ops": best_split.get("ops", ".000")
+    }
+
+@st.cache_data(ttl=1800)   # Cache for 30 minutes so numbers stay stable
 def generate_bvp_dataframe():
+    fetch_time = datetime.now().strftime("%H:%M:%S")
+    st.session_state['last_fetched'] = fetch_time
+
     with st.spinner("Fetching ALL BvP matchups from MLB API..."):
         game_date = date.today().isoformat()
         games = fetch_schedule(game_date)
@@ -86,7 +99,8 @@ def generate_bvp_dataframe():
             st.error("No games found today.")
             return pd.DataFrame()
 
-        rows = []
+        # Use dict to guarantee unique (batter_id, pitcher_id) pairs
+        matchup_dict = {}
         progress_bar = st.progress(0)
         total = len(games) * 2
         count = 0
@@ -105,15 +119,16 @@ def generate_bvp_dataframe():
             for bat_team, bat_team_id, sp_name, sp_id, pit_team, side_key in sides:
                 if not sp_id:
                     continue
-                batters = fetch_roster_batters(bat_team_id)   # Always full roster
+                batters = fetch_roster_batters(bat_team_id)
 
                 for bname, bid in batters:
                     if not bid:
                         continue
                     bvp = fetch_bvp(bid, sp_id)
-                    if not bvp or bvp["ab"] < MIN_AB:
+                    if not bvp:
                         continue
-                    rows.append({
+                    key = (bid, sp_id)   # Unique key for this exact matchup
+                    matchup_dict[key] = {
                         "Matchup": label,
                         "Batter": bname,
                         "Batter Team": bat_team,
@@ -124,19 +139,20 @@ def generate_bvp_dataframe():
                         "AVG": bvp["avg"], "OBP": bvp["obp"],
                         "SLG": bvp["slg"], "OPS": bvp["ops"],
                         "Lineup?": "Projected"
-                    })
+                    }
                 count += 1
                 progress_bar.progress(min(count / total, 1.0))
 
-        df = pd.DataFrame(rows)
-        # Sort by OPS descending so order is always consistent
+        df = pd.DataFrame(matchup_dict.values())
         if not df.empty:
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
 data = generate_bvp_dataframe()
 
-# Buttons
+if 'last_fetched' in st.session_state:
+    st.info(f"📅 Data last fetched at: **{st.session_state['last_fetched']}**")
+
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("All Batter vs. Pitcher Matchups")
@@ -146,7 +162,6 @@ with col2:
             st.cache_data.clear()
             st.rerun()
 
-# OPS color coding
 def color_ops(val):
     try:
         v = float(val)
@@ -168,6 +183,5 @@ styled = data.style\
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 
-st.success(f"✅ Showing {len(data)} stable BvP matchups (minimum {MIN_AB} career AB)")
-
-st.caption("Data is now sorted by OPS descending and uses full rosters for consistency.")
+st.success(f"✅ Showing {len(data)} stable BvP matchups")
+st.caption("Note: Career stats are now consistently selected (highest AB count). Numbers should stay the same between refreshes unless MLB itself updates them.")
