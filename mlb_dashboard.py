@@ -1,5 +1,5 @@
 """
-MLB Daily BvP Dashboard - Public Web App (Updated Version)
+MLB Daily BvP Dashboard - Public Web App (Fixed for Streamlit Cloud)
 """
 import streamlit as st
 import pandas as pd
@@ -15,7 +15,7 @@ st.caption(f"Top 30 BvP — Updated {date.today().strftime('%B %d, %Y')}")
 # Your public GitHub Excel file
 EXCEL_URL = "https://raw.githubusercontent.com/Mcmini1985/mlb-bvp-dashboard/main/Top_30_batter.xlsx"
 
-@st.cache_data(ttl=300)   # Refresh every 5 minutes
+@st.cache_data(ttl=300)
 def load_data():
     try:
         response = requests.get(EXCEL_URL, timeout=15)
@@ -24,7 +24,7 @@ def load_data():
         
         df_dict = pd.read_excel(excel_data, sheet_name=None)
         
-        # Automatically find the BvP sheet
+        # Find the correct sheet
         sheet_name = None
         for name in df_dict.keys():
             if "BvP" in name or "Matchup" in name:
@@ -38,7 +38,6 @@ def load_data():
         return data
     except Exception as e:
         st.error(f"❌ Could not load Excel file from GitHub:\n{e}")
-        st.info("Tip: Make sure requirements.txt contains 'openpyxl' and you have re-deployed the app.")
         st.stop()
 
 data = load_data()
@@ -53,7 +52,7 @@ with col2:
             st.cache_data.clear()
             st.rerun()
 
-# OPS color coding
+# OPS color coding (fixed for new pandas)
 def color_ops(val):
     try:
         v = float(val)
@@ -66,9 +65,9 @@ def color_ops(val):
     except:
         return ""
 
-# Styled table
+# Styled table - FIXED: use .map() instead of deprecated .applymap()
 styled_table = data.style\
-    .applymap(color_ops, subset=["OPS"])\
+    .map(color_ops, subset=["OPS"])\
     .set_properties(**{'text-align': 'center'})\
     .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'), 
                                                     ('color', 'white'), 
@@ -81,13 +80,13 @@ st.dataframe(
     height=800
 )
 
-# Sidebar information
+# Sidebar
 with st.sidebar:
     st.header("How to Update")
     st.write("1. Run your Python generator script (`mlb_daily_bvp.py`)")
-    st.write("2. Upload the new `Top_30_batter.xlsx` to your GitHub repository")
-    st.write("3. Click the **Refresh Data Now** button above")
+    st.write("2. Upload the new `Top_30_batter.xlsx` to GitHub")
+    st.write("3. Click **Refresh Data Now** above")
     st.divider()
-    st.caption("Dashboard built for MinhPC\nPublic link ready to share with friends")
+    st.caption("Dashboard by MinhPC • Public link ready to share")
 
 st.success("✅ Dashboard is live and working!")
