@@ -1,6 +1,6 @@
 """
-MLB Daily BvP Dashboard - All Batters + Handedness + Advanced Stats
-Default filter: AB > 20 and AVG > .250
+MLB Daily BvP Dashboard - All Batters + Advanced Stats
+Fixed Batter Hand & Pitcher Hand
 """
 import streamlit as st
 import pandas as pd
@@ -18,13 +18,24 @@ BASE = "https://statsapi.mlb.com/api/v1"
 
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
-    data = api_get(f"/people/{player_id}")
-    person = data.get("people", [{}])[0]
-    bats = person.get("bats", "Unknown")
-    throws = person.get("throws", "Unknown")
-    batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats, bats)
-    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws, throws)
-    return batter_hand, pitcher_hand
+    """Improved handedness lookup with fallback"""
+    try:
+        data = api_get(f"/people/{player_id}")
+        person = data.get("people", [{}])[0]
+        
+        bats = person.get("bats", "")
+        throws = person.get("throws", "")
+        
+        batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats.upper(), "Unknown")
+        pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
+        
+        # Fallback if still unknown
+        if batter_hand == "Unknown" or pitcher_hand == "Unknown":
+            st.warning(f"Handedness missing for player ID {player_id}")
+        
+        return batter_hand, pitcher_hand
+    except:
+        return "Unknown", "Unknown"
 
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
@@ -33,6 +44,7 @@ def get_batter_vs_hand(batter_id):
     
     l_avg = l_ops = ".000"
     r_avg = r_ops = ".000"
+
     for stat in vs_l.get("stats", []):
         for split in stat.get("splits", []):
             s = split.get("stat", {})
@@ -96,6 +108,7 @@ def api_get(path, **params):
             return {}
     return {}
 
+# (The rest of the functions remain the same as before)
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
     games = []
@@ -219,6 +232,41 @@ def generate_bvp_dataframe():
             df = df[(df["AB"] > 20) & (df["AVG"] > 0.250)]
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
+
+@st.cache_data(ttl=3600)
+def get_recent_batter_stats(batter_id):
+    season = date.today().year
+    data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
+    last_20_hits = 0
+    last_20_ab = 0
+    streak = 0
+    current_streak = 0
+
+    games = []
+    for sg in data.get("stats", []):
+        games.extend(sg.get("splits", []))
+
+    games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
+
+    for game in games:
+        stat = game.get("stat", {})
+        ab = stat.get("atBats", 0)
+        hits = stat.get("hits", 0)
+
+        if last_20_ab < 20:
+            needed = 20 - last_20_ab
+            add_ab = min(ab, needed)
+            last_20_ab += add_ab
+            last_20_hits += min(hits, add_ab)
+
+        if hits > 0:
+            current_streak += 1
+        else:
+            current_streak = 0
+        streak = max(streak, current_streak)
+
+    last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
+    return last_20_str, streak
 
 data = generate_bvp_dataframe()
 
