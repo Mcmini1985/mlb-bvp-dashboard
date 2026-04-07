@@ -18,12 +18,26 @@ BASE = "https://statsapi.mlb.com/api/v1"
 
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
+    """Fixed: correctly gets Batter Hand and Pitcher Throwing Hand"""
     data = api_get(f"/people/{player_id}")
     person = data.get("people", [{}])[0]
-    bats = person.get("batSide", {}).get("code", "") or person.get("bats", "")
-    throws = person.get("pitchHand", {}).get("code", "") or person.get("throws", "")
+    
+    # Batter Hand (bats / batSide)
+    bats = (
+        person.get("batSide", {}).get("code", "") or
+        person.get("bats", "") or
+        person.get("batHand", {}).get("code", "")
+    )
     batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats.upper(), "Unknown")
+    
+    # Pitcher Throwing Hand (throws / pitchHand)
+    throws = (
+        person.get("pitchHand", {}).get("code", "") or
+        person.get("throws", "") or
+        person.get("pitchHand", {}).get("code", "")
+    )
     pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
+    
     return batter_hand, pitcher_hand
 
 @st.cache_data(ttl=86400)
@@ -47,10 +61,8 @@ def get_batter_vs_hand(batter_id):
 
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
-    """Fixed: correctly accumulates the most recent 20 at-bats"""
     season = date.today().year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
-    
     last_20_hits = 0
     last_20_ab = 0
     streak = 0
@@ -60,7 +72,6 @@ def get_recent_batter_stats(batter_id):
     for sg in data.get("stats", []):
         games.extend(sg.get("splits", []))
 
-    # Most recent games first
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
 
     for game in games:
@@ -68,20 +79,17 @@ def get_recent_batter_stats(batter_id):
         ab = stat.get("atBats", 0)
         hits = stat.get("hits", 0)
 
-        # Accumulate until we have at least 20 AB
         if last_20_ab < 20:
             needed = 20 - last_20_ab
             add_ab = min(ab, needed)
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Hitting streak (only count games with plate appearances)
-        if ab > 0:
-            if hits > 0:
-                current_streak += 1
-            else:
-                current_streak = 0
-            streak = max(streak, current_streak)
+        if hits > 0:
+            current_streak += 1
+        else:
+            current_streak = 0
+        streak = max(streak, current_streak)
 
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
     return last_20_str, streak
