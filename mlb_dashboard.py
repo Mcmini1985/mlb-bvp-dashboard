@@ -1,6 +1,6 @@
 """
-MLB Daily BvP Dashboard - Standalone (No Excel File)
-With retry logic for MLB API timeouts
+MLB Daily BvP Dashboard - Standalone (ALL Batters)
+Pulls fresh data directly from MLB API — shows every batter with career BvP stats.
 """
 import streamlit as st
 import pandas as pd
@@ -11,16 +11,15 @@ import time
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
 
-st.title("⚾ MLB Daily Batter vs. Pitcher Matchups")
-st.caption(f"Top 30 BvP — Live Data • {date.today().strftime('%B %d, %Y')}")
+st.title("⚾ All Batter vs. Pitcher Matchups")
+st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B %d, %Y')}")
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
-MAX_BATTERS_PER_TEAM = 9
+MAX_BATTERS_PER_TEAM = 25   # Captures nearly every relevant batter
 
-# Improved api_get with retry logic
 def api_get(path, **params):
-    for attempt in range(1, 4):  # 3 attempts
+    for attempt in range(1, 4):
         try:
             r = requests.get(BASE + path, params=params, timeout=30)
             r.raise_for_status()
@@ -29,8 +28,7 @@ def api_get(path, **params):
             if attempt == 3:
                 st.warning(f"API timeout after 3 attempts: {path}")
                 return {}
-            st.info(f"API timeout... retrying ({attempt}/3)")
-            time.sleep(2 ** attempt)  # backoff: 2s, 4s, 8s
+            time.sleep(2 ** attempt)
         except Exception as e:
             st.warning(f"API error: {path} → {e}")
             return {}
@@ -83,10 +81,10 @@ def fetch_bvp(batter_id, pitcher_id):
             }
     return None
 
-# ── Generate DataFrame directly from API ─────────────────────────────────────
+# ── Generate full DataFrame (ALL batters) ───────────────────────────────────
 @st.cache_data(ttl=300)
 def generate_bvp_dataframe():
-    with st.spinner("Fetching latest MLB data (this may take 1-3 minutes)..."):
+    with st.spinner("Fetching ALL BvP matchups from MLB API..."):
         game_date = date.today().isoformat()
         games = fetch_schedule(game_date)
         if not games:
@@ -95,7 +93,7 @@ def generate_bvp_dataframe():
 
         rows = []
         progress_bar = st.progress(0)
-        total_games = len(games) * 2  # both sides
+        total = len(games) * 2
         count = 0
 
         for g in games:
@@ -135,20 +133,19 @@ def generate_bvp_dataframe():
                         "Lineup?": lineup_tag
                     })
                 count += 1
-                progress_bar.progress(min(count / total_games, 1.0))
+                progress_bar.progress(min(count / total, 1.0))
 
         df = pd.DataFrame(rows)
         return df
 
-# Load data
 data = generate_bvp_dataframe()
 
 # Buttons
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.subheader("Top 30 Batter vs. Pitcher Matchups")
+    st.subheader("All Batter vs. Pitcher Matchups")
 with col2:
-    if st.button("🔄 Refresh Data Now", type="primary"):
+    if st.button("🔄 Refresh All Data Now", type="primary"):
         with st.spinner("Pulling fresh data from MLB API..."):
             st.cache_data.clear()
             st.rerun()
@@ -173,6 +170,6 @@ styled = data.style\
                                                     ('color', 'white'), 
                                                     ('font-weight', 'bold')]}])
 
-st.dataframe(styled, use_container_width=True, hide_index=True, height=800)
+st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 
-st.success("✅ Data pulled directly from MLB API (with retry logic)")
+st.success("✅ Showing ALL batters with career BvP stats (no limit)")
