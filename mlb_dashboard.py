@@ -1,58 +1,143 @@
 """
-MLB Daily BvP Dashboard - Public Web App (Fixed for Streamlit Cloud)
+MLB Daily BvP Dashboard - Standalone (No Excel File Needed)
+Pulls fresh data directly from MLB API every time the app loads.
 """
 import streamlit as st
 import pandas as pd
 import requests
+from datetime import date, datetime
 from io import BytesIO
-from datetime import date
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
 
 st.title("⚾ MLB Daily Batter vs. Pitcher Matchups")
-st.caption(f"Top 30 BvP — Updated {date.today().strftime('%B %d, %Y')}")
+st.caption(f"Top 30 BvP — Live Data • {date.today().strftime('%B %d, %Y')}")
 
-# Your public GitHub Excel file
-EXCEL_URL = "https://raw.githubusercontent.com/Mcmini1985/mlb-bvp-dashboard/main/Top_30_batter.xlsx"
+# ── CONFIGURATION ────────────────────────────────────────────────────────────
+BASE = "https://statsapi.mlb.com/api/v1"
+MAX_BATTERS_PER_TEAM = 9
 
-@st.cache_data(ttl=300)
-def load_data():
+# ── Core functions from your generator script ───────────────────────────────
+def api_get(path, **params):
     try:
-        response = requests.get(EXCEL_URL, timeout=15)
-        response.raise_for_status()
-        excel_data = BytesIO(response.content)
-        
-        df_dict = pd.read_excel(excel_data, sheet_name=None)
-        
-        # Find the correct sheet
-        sheet_name = None
-        for name in df_dict.keys():
-            if "BvP" in name or "Matchup" in name:
-                sheet_name = name
-                break
-        if not sheet_name:
-            sheet_name = list(df_dict.keys())[0]
-        
-        data = df_dict[sheet_name].copy()
-        data.columns = [str(col).strip() for col in data.columns]
-        return data
+        r = requests.get(BASE + path, params=params, timeout=15)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
-        st.error(f"❌ Could not load Excel file from GitHub:\n{e}")
-        st.stop()
+        st.warning(f"API warning: {path} → {e}")
+        return {}
 
-data = load_data()
+def fetch_schedule(game_date):
+    data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
+    games = []
+    for d in data.get("dates", []):
+        games.extend(d.get("games", []))
+    return games
 
-# Header + Refresh button
+def probable_pitcher(game, side):
+    pp = game.get("teams", {}).get(side, {}).get("probablePitcher", {})
+    return pp.get("fullName", "TBD"), pp.get("id")
+
+def team_info(game, side):
+    t = game.get("teams", {}).get(side, {}).get("team", {})
+    return t.get("name", "?"), t.get("id")
+
+def fetch_roster_batters(team_id):
+    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=date.today().year)
+    batters = []
+    for p in data.get("roster", []):
+        if p.get("position", {}).get("type", "") != "Pitcher":
+            person = p.get("person", {})
+            batters.append((person.get("fullName", "?"), person.get("id")))
+    return batters[:MAX_BATTERS_PER_TEAM]
+
+def fetch_confirmed_lineup(game, side):
+    order = game.get("lineups", {}).get(f"{side}Players", [])
+    return [(p.get("fullName", "?"), p.get("id")) for p in order]
+
+def fetch_bvp(batter_id, pitcher_id):
+    data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer", opposingPlayerId=pitcher_id,
+                   sportId=1, group="hitting")
+    for sg in data.get("stats", []):
+        splits = sg.get("splits", [])
+        if splits:
+            s = splits[0].get("stat", {})
+            ab = s.get("atBats", 0)
+            if ab == 0:
+                return None
+            return {
+                "ab": ab, "h": s.get("hits", 0), "hr": s.get("homeRuns", 0),
+                "rbi": s.get("rbi", 0), "bb": s.get("baseOnBalls", 0),
+                "so": s.get("strikeOuts", 0),
+                "avg": s.get("avg", ".000"), "obp": s.get("obp", ".000"),
+                "slg": s.get("slg", ".000"), "ops": s.get("ops", ".000")
+            }
+    return None
+
+# ── Generate DataFrame directly ─────────────────────────────────────────────
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def generate_bvp_dataframe():
+    game_date = date.today().isoformat()
+    games = fetch_schedule(game_date)
+    if not games:
+        st.error("No games found today.")
+        return pd.DataFrame()
+
+    rows = []
+    for g in games:
+        home_name, home_id = team_info(g, "home")
+        away_name, away_id = team_info(g, "away")
+        label = f"{away_name} @ {home_name}"
+        h_sp, h_sp_id = probable_pitcher(g, "home")
+        a_sp, a_sp_id = probable_pitcher(g, "away")
+
+        sides = [
+            (away_name, away_id, h_sp, h_sp_id, home_name, "away"),
+            (home_name, home_id, a_sp, a_sp_id, away_name, "home"),
+        ]
+        for bat_team, bat_team_id, sp_name, sp_id, pit_team, side_key in sides:
+            if not sp_id:
+                continue
+            confirmed = fetch_confirmed_lineup(g, side_key)
+            batters = confirmed if confirmed else fetch_roster_batters(bat_team_id)
+            lineup_tag = "✓ Confirmed" if confirmed else "Projected"
+
+            for bname, bid in batters:
+                if not bid:
+                    continue
+                bvp = fetch_bvp(bid, sp_id)
+                if not bvp:
+                    continue
+                rows.append({
+                    "Matchup": label,
+                    "Batter": bname,
+                    "Batter Team": bat_team,
+                    "Opposing Pitcher": sp_name,
+                    "Pitcher Team": pit_team,
+                    "AB": bvp["ab"], "H": bvp["h"], "HR": bvp["hr"],
+                    "RBI": bvp["rbi"], "BB": bvp["bb"], "SO": bvp["so"],
+                    "AVG": bvp["avg"], "OBP": bvp["obp"],
+                    "SLG": bvp["slg"], "OPS": bvp["ops"],
+                    "Lineup?": lineup_tag
+                })
+
+    df = pd.DataFrame(rows)
+    return df
+
+# Load data
+data = generate_bvp_dataframe()
+
+# Buttons
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("Top 30 Batter vs. Pitcher Matchups")
 with col2:
     if st.button("🔄 Refresh Data Now", type="primary"):
-        with st.spinner("Fetching latest data from GitHub..."):
+        with st.spinner("Pulling latest data from MLB API..."):
             st.cache_data.clear()
             st.rerun()
 
-# OPS color coding (fixed for new pandas)
+# Color coding for OPS
 def color_ops(val):
     try:
         v = float(val)
@@ -65,28 +150,11 @@ def color_ops(val):
     except:
         return ""
 
-# Styled table - FIXED: use .map() instead of deprecated .applymap()
-styled_table = data.style\
+styled = data.style\
     .map(color_ops, subset=["OPS"])\
     .set_properties(**{'text-align': 'center'})\
-    .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'), 
-                                                    ('color', 'white'), 
-                                                    ('font-weight', 'bold')]}])
+    .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'), ('color', 'white'), ('font-weight', 'bold')]}])
 
-st.dataframe(
-    styled_table,
-    use_container_width=True,
-    hide_index=True,
-    height=800
-)
+st.dataframe(styled, use_container_width=True, hide_index=True, height=800)
 
-# Sidebar
-with st.sidebar:
-    st.header("How to Update")
-    st.write("1. Run your Python generator script (`mlb_daily_bvp.py`)")
-    st.write("2. Upload the new `Top_30_batter.xlsx` to GitHub")
-    st.write("3. Click **Refresh Data Now** above")
-    st.divider()
-    st.caption("Dashboard by MinhPC • Public link ready to share")
-
-st.success("✅ Dashboard is live and working!")
+st.success("✅ Data pulled directly from MLB API — no Excel file needed!")
