@@ -5,19 +5,20 @@ Default filter: AB > 10 and AVG > .250
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, date
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, timedelta
 import time
-
-# ── CONFIGURE EASTERN TIME ───────────────────────────────
-ET = ZoneInfo("US/Eastern")
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
 
-st.title("⚾ All Batter vs. Pitcher Matchups")
-st.caption(f"Full BvP Data — Live from MLB API • {datetime.now(ET).strftime('%B %d, %Y')}")
+# ── EASTERN TIME FUNCTION ────────────────────────────────────────────────
+def now_et():
+    """Return current Eastern Time (ET) without zoneinfo/pytz."""
+    return datetime.utcnow() - timedelta(hours=4)  # ET = UTC-4
 
-# ── CONFIGURATION ────────────────────────────────────────
+st.title("⚾ All Batter vs. Pitcher Matchups")
+st.caption(f"Full BvP Data — Live from MLB API • {now_et().strftime('%B %d, %Y')}")
+
+# ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
 
 def api_get(path, **params):
@@ -32,6 +33,7 @@ def api_get(path, **params):
             time.sleep(2 ** attempt)
     return {}
 
+# ── PLAYER HANDEDNESS ──────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
     data = api_get(f"/people/{player_id}")
@@ -39,9 +41,10 @@ def get_player_handedness(player_id):
     bats = person.get("batSide", {}).get("code", "") or person.get("bats", "")
     throws = person.get("pitchHand", {}).get("code", "") or person.get("throws", "")
     batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats.upper(), "Unknown")
-    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
+    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")  # Corrected
     return batter_hand, pitcher_hand
 
+# ── BATTER SPLIT STATS ──────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
     data = api_get(
@@ -65,9 +68,10 @@ def get_batter_vs_hand(batter_id):
                 r_ops = s.get("ops", ".000")
     return l_avg, l_ops, r_avg, r_ops
 
+# ── RECENT BATTER STATS ─────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
-    season = datetime.now(ET).year
+    season = now_et().year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
     last_20_hits = 0
     last_20_ab = 0
@@ -90,7 +94,7 @@ def get_recent_batter_stats(batter_id):
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Streak: walk through newest-first, break at first hitless game
+        # Streak: break at first hitless game
         if ab > 0:
             if hits > 0:
                 current_streak += 1
@@ -100,6 +104,7 @@ def get_recent_batter_stats(batter_id):
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
     return last_20_str, current_streak
 
+# ── SCHEDULE & GAME INFO ───────────────────────────────────────────────────
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
     games = []
@@ -116,7 +121,7 @@ def team_info(game, side):
     return t.get("name", "?"), t.get("id")
 
 def fetch_roster_batters(team_id):
-    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=datetime.now(ET).year)
+    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=now_et().year)
     batters = []
     for p in data.get("roster", []):
         if p.get("position", {}).get("type", "") != "Pitcher":
@@ -124,6 +129,7 @@ def fetch_roster_batters(team_id):
             batters.append((person.get("fullName", "?"), person.get("id")))
     return batters
 
+# ── BVP STATS ──────────────────────────────────────────────────────────────
 def fetch_bvp(batter_id, pitcher_id):
     data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer", opposingPlayerId=pitcher_id,
                    sportId=1, group="hitting")
@@ -151,13 +157,14 @@ def fetch_bvp(batter_id, pitcher_id):
         "ops": best.get("ops", ".000")
     }
 
+# ── GENERATE FULL DATAFRAME ────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
-    fetch_time = datetime.now(ET).strftime("%H:%M:%S")
+    fetch_time = now_et().strftime("%H:%M:%S")
     st.session_state['last_fetched'] = fetch_time
 
     with st.spinner("Fetching ALL BvP matchups..."):
-        game_date = datetime.now(ET).date().isoformat()
+        game_date = now_et().date().isoformat()
         games = fetch_schedule(game_date)
         if not games:
             st.error("No games found today.")
@@ -192,7 +199,7 @@ def generate_bvp_dataframe():
                         continue
 
                     last_20_ab, streak = get_recent_batter_stats(bid)
-                    batter_hand, pitcher_hand = get_player_handedness(sp_id)  # correct pitcher hand
+                    batter_hand, pitcher_hand = get_player_handedness(bid)
                     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
 
                     key = (bid, sp_id)
@@ -229,9 +236,8 @@ data = generate_bvp_dataframe()
 if 'last_fetched' in st.session_state:
     st.info(f"📅 Data last fetched at: **{st.session_state['last_fetched']}**")
 
-# ── FILTERS ─────────────────────────────────────────────
+# ── FILTERS ────────────────────────────────────────────────────────────────
 st.sidebar.header("🔎 Filters")
-
 batter_search = st.sidebar.text_input("Search Batter", "")
 
 batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
@@ -257,7 +263,7 @@ if selected_batter_hand:
 if selected_pitcher_hand:
     filtered_data = filtered_data[filtered_data["Pitcher Hand"].isin(selected_pitcher_hand)]
 
-# ── DISPLAY ─────────────────────────────────────────────
+# ── DISPLAY ───────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("All Batter vs. Pitcher Matchups")
@@ -287,5 +293,4 @@ styled = filtered_data.style\
                                                     ('font-weight', 'bold')]}])
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
-
 st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250)")
