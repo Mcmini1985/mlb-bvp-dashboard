@@ -59,32 +59,54 @@ def get_batter_vs_hand(batter_id):
 
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
-    """Last 20 AB & hitting streak"""
+    """Last 20 AB & hitting streak — calculated in separate passes"""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
-    last_20_hits = 0
-    last_20_ab = 0
+
     games = []
     for sg in data.get("stats", []):
         games.extend(sg.get("splits", []))
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
-    streak = 0
+
+    # ── Pass 1: Last 20 AB ──
+    # Walk newest-to-oldest, accumulate full game AB until we reach 20.
+    # Skip games with 0 AB (walk/HBP-only appearances).
+    last_20_hits = 0
+    last_20_ab = 0
+    for game in games:
+        if last_20_ab >= 20:
+            break
+        stat = game.get("stat", {})
+        ab = stat.get("atBats", 0)
+        hits = stat.get("hits", 0)
+        if ab == 0:
+            continue
+        remaining = 20 - last_20_ab
+        if ab <= remaining:
+            last_20_ab += ab
+            last_20_hits += hits
+        else:
+            # Only need a partial game to reach 20 — prorate hits
+            last_20_hits += round(hits * remaining / ab)
+            last_20_ab += remaining
+
+    last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
+
+    # ── Pass 2: Hitting streak ──
+    # Walk newest-to-oldest, count consecutive games with a hit (AB > 0 only).
+    current_streak = 0
     for game in games:
         stat = game.get("stat", {})
         ab = stat.get("atBats", 0)
         hits = stat.get("hits", 0)
-        if last_20_ab < 20:
-            needed = 20 - last_20_ab
-            add_ab = min(ab, needed)
-            last_20_ab += add_ab
-            last_20_hits += min(hits, add_ab)
-        if ab > 0 and hits > 0:
-            streak += 1
-        else:
-            break
-    last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
-    return last_20_str, streak
+        if ab > 0:
+            if hits > 0:
+                current_streak += 1
+            else:
+                break  # streak ends at first hitless game with AB
+
+    return last_20_str, current_streak
 
 # ── SCHEDULE / ROSTER FUNCTIONS ──────────────────────────────────────────────
 def fetch_schedule(game_date):
@@ -250,7 +272,7 @@ with col1:
 with col2:
     if st.button("🔄 Refresh All Data Now", type="primary"):
         st.cache_data.clear()
-        st.experimental_rerun()  # respect new cache TTL
+        st.rerun()
 
 def color_ops(val):
     try:
