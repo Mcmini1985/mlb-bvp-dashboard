@@ -7,9 +7,6 @@ import pandas as pd
 import requests
 from datetime import date, datetime
 import time
-from zoneinfo import ZoneInfo  # ET timezone support
-
-ET = ZoneInfo("US/Eastern")  # Eastern Time
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
 
@@ -89,8 +86,7 @@ def get_recent_batter_stats(batter_id):
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Streak: walk through newest-first, break at first hitless game
-        if ab > 0:
+        if ab > 0:  # only count games with plate appearances
             if hits > 0:
                 current_streak += 1
             else:
@@ -152,7 +148,8 @@ def fetch_bvp(batter_id, pitcher_id):
 
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
-    fetch_time = datetime.now(ET).strftime("%H:%M:%S")  # <- ET timezone applied
+    # ✅ Keep server local time (ET is default for MLB API dates)
+    fetch_time = datetime.now().strftime("%H:%M:%S")
     st.session_state['last_fetched'] = fetch_time
 
     with st.spinner("Fetching ALL BvP matchups..."):
@@ -189,12 +186,12 @@ def generate_bvp_dataframe():
                     bvp = fetch_bvp(bid, sp_id)
                     if not bvp:
                         continue
-
+                    
                     last_20_ab, streak = get_recent_batter_stats(bid)
-                    batter_hand, _ = get_player_handedness(bid)
-                    _, pitcher_hand = get_player_handedness(sp_id)  # Correct pitcher hand
+                    batter_hand, _ = get_player_handedness(bid)       # Correct batter hand
+                    _, pitcher_hand = get_player_handedness(sp_id)   # Correct pitcher hand
                     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
-
+                    
                     key = (bid, sp_id)
                     matchup_dict[key] = {
                         "Matchup": label,
