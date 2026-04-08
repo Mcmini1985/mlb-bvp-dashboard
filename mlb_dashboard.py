@@ -5,7 +5,7 @@ Default filter: AB > 10 and AVG > .250
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 import time
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
@@ -15,6 +15,11 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
+
+# Eastern Time helper
+ET_OFFSET = timedelta(hours=-4)
+def now_et():
+    return datetime.now(timezone(ET_OFFSET)).strftime("%Y-%m-%d %H:%M:%S ET")
 
 def api_get(path, **params):
     for attempt in range(1, 4):
@@ -28,20 +33,24 @@ def api_get(path, **params):
             time.sleep(2 ** attempt)
     return {}
 
+# ── PLAYER HANDEDNESS ────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
-    """Returns batter hand and pitcher throwing hand"""
+    """Fetch batter hand and pitcher throwing hand correctly"""
     data = api_get(f"/people/{player_id}")
     person = data.get("people", [{}])[0]
 
-    bats = person.get("batSide", {}).get("code", "")  # Batter hand
-    throws = person.get("pitchHand", {}).get("code", "")  # Pitcher throwing hand
-
+    # Batter hand
+    bats = person.get("batSide", {}).get("code", "") or person.get("bats", "")
     batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats.upper(), "Unknown")
+
+    # Pitcher throwing hand (not batting hand)
+    throws = person.get("pitchHand", {}).get("code", "") or person.get("throws", "")
     pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
 
     return batter_hand, pitcher_hand
 
+# ── CAREER SPLITS ───────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
     data = api_get(
@@ -65,6 +74,7 @@ def get_batter_vs_hand(batter_id):
                 r_ops = s.get("ops", ".000")
     return l_avg, l_ops, r_avg, r_ops
 
+# ── RECENT BATTING STATS ────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
     season = date.today().year
@@ -90,8 +100,8 @@ def get_recent_batter_stats(batter_id):
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Hitting streak: walk through newest-first, stop at first hitless game
-        if ab > 0:
+        # Streak: walk through newest-first, break at first hitless game
+        if ab > 0:  # only count games with plate appearances
             if hits > 0:
                 current_streak += 1
             else:
@@ -100,6 +110,7 @@ def get_recent_batter_stats(batter_id):
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
     return last_20_str, current_streak
 
+# ── SCHEDULE ───────────────────────────────────────────────────────────────
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
     games = []
@@ -151,9 +162,10 @@ def fetch_bvp(batter_id, pitcher_id):
         "ops": best.get("ops", ".000")
     }
 
+# ── BUILD DATAFRAME ─────────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
-    fetch_time = datetime.now().strftime("%H:%M:%S")
+    fetch_time = now_et()
     st.session_state['last_fetched'] = fetch_time
 
     with st.spinner("Fetching ALL BvP matchups..."):
@@ -190,12 +202,11 @@ def generate_bvp_dataframe():
                     bvp = fetch_bvp(bid, sp_id)
                     if not bvp:
                         continue
-                    
+
                     last_20_ab, streak = get_recent_batter_stats(bid)
-                    batter_hand, _ = get_player_handedness(bid)       # batter hand
-                    _, pitcher_hand = get_player_handedness(sp_id)   # pitcher throwing hand
+                    batter_hand, pitcher_hand = get_player_handedness(sp_id)  # ⚾ correct fetching for pitcher
                     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
-                    
+
                     key = (bid, sp_id)
                     matchup_dict[key] = {
                         "Matchup": label,
@@ -225,6 +236,7 @@ def generate_bvp_dataframe():
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
+# ── RUN ─────────────────────────────────────────────────────────────────────
 data = generate_bvp_dataframe()
 
 if 'last_fetched' in st.session_state:
@@ -258,7 +270,7 @@ if selected_batter_hand:
 if selected_pitcher_hand:
     filtered_data = filtered_data[filtered_data["Pitcher Hand"].isin(selected_pitcher_hand)]
 
-# ── Display ─────────────────────────────────────────────────────────────────
+# ── DISPLAY ────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("All Batter vs. Pitcher Matchups")
