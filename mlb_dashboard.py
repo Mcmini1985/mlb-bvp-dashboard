@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import date, datetime
+from zoneinfo import ZoneInfo  # For Eastern Time
 import time
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
@@ -148,8 +149,8 @@ def fetch_bvp(batter_id, pitcher_id):
 
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
-    # ✅ Keep server local time (ET is default for MLB API dates)
-    fetch_time = datetime.now().strftime("%H:%M:%S")
+    # ✅ Pull current time in Eastern Time
+    fetch_time = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%H:%M:%S")
     st.session_state['last_fetched'] = fetch_time
 
     with st.spinner("Fetching ALL BvP matchups..."):
@@ -224,7 +225,7 @@ def generate_bvp_dataframe():
 data = generate_bvp_dataframe()
 
 if 'last_fetched' in st.session_state:
-    st.info(f"📅 Data last fetched at: **{st.session_state['last_fetched']}**")
+    st.info(f"📅 Data last fetched at: **{st.session_state['last_fetched']} ET**")
 
 # ── FILTERS ─────────────────────────────────────────────────────────────────
 st.sidebar.header("🔎 Filters")
