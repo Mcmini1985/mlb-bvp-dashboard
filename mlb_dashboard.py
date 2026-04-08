@@ -30,6 +30,7 @@ def api_get(path, **params):
 
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
+    """Get batter and pitcher hand correctly"""
     data = api_get(f"/people/{player_id}")
     person = data.get("people", [{}])[0]
     bats = person.get("batSide", {}).get("code", "") or person.get("bats", "")
@@ -40,6 +41,7 @@ def get_player_handedness(player_id):
 
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
+    """Get batter performance vs left/right hand pitchers"""
     data = api_get(
         f"/people/{batter_id}/stats",
         stats="careerStatSplits",
@@ -63,31 +65,35 @@ def get_batter_vs_hand(batter_id):
 
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
+    """Accurate last 20 ABs and hitting streak"""
     season = date.today().year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
+    
     last_20_hits = 0
     last_20_ab = 0
+    current_streak = 0
 
     games = []
     for sg in data.get("stats", []):
         games.extend(sg.get("splits", []))
 
+    # Sort newest first
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
 
-    current_streak = 0
+    # Calculate last 20 ABs and hits
     for game in games:
         stat = game.get("stat", {})
         ab = stat.get("atBats", 0)
         hits = stat.get("hits", 0)
 
         if last_20_ab < 20:
-            needed = 20 - last_20_ab
-            add_ab = min(ab, needed)
+            remaining = 20 - last_20_ab
+            add_ab = min(ab, remaining)
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Streak: walk through newest-first, break at first hitless game
-        if ab > 0:  # only count games with plate appearances
+        # Hitting streak
+        if ab > 0:
             if hits > 0:
                 current_streak += 1
             else:
@@ -147,7 +153,6 @@ def fetch_bvp(batter_id, pitcher_id):
         "ops": best.get("ops", ".000")
     }
 
-# ── Generate BvP DataFrame ─────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
     fetch_time = datetime.now().strftime("%H:%M:%S")
@@ -189,11 +194,7 @@ def generate_bvp_dataframe():
                         continue
                     
                     last_20_ab, streak = get_recent_batter_stats(bid)
-
-                    # ✅ Correct batter and pitcher hand fetch
-                    batter_hand, _ = get_player_handedness(bid)
-                    _, pitcher_hand = get_player_handedness(sp_id)
-
+                    batter_hand, pitcher_hand = get_player_handedness(bid)
                     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
                     
                     key = (bid, sp_id)
@@ -225,7 +226,6 @@ def generate_bvp_dataframe():
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
-# ── Fetch Data ───────────────────────────────────────────────────────────────
 data = generate_bvp_dataframe()
 
 if 'last_fetched' in st.session_state:
@@ -233,6 +233,7 @@ if 'last_fetched' in st.session_state:
 
 # ── FILTERS ─────────────────────────────────────────────────────────────────
 st.sidebar.header("🔎 Filters")
+
 batter_search = st.sidebar.text_input("Search Batter", "")
 
 batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
@@ -288,4 +289,5 @@ styled = filtered_data.style\
                                                     ('font-weight', 'bold')]}])
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
+
 st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250)")
