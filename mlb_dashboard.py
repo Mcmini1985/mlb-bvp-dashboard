@@ -16,92 +16,6 @@ st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
 
-@st.cache_data(ttl=86400)
-def get_player_handedness(player_id):
-    data = api_get(f"/people/{player_id}")
-    person = data.get("people", [{}])[0]
-
-    # Batter hand
-    bats = (
-        person.get("batSide", {}).get("code") or
-        person.get("bats") or
-        person.get("batHand", {}).get("code")
-    )
-    bats = (bats or "").upper()
-    batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats, "Unknown")
-
-    return batter_hand
-
-@st.cache_data(ttl=86400)
-def get_pitcher_hand(player_id):
-    data = api_get(f"/people/{player_id}")
-    person = data.get("people", [{}])[0]
-
-    # Pitcher hand
-    throws = (
-        person.get("pitchHand", {}).get("code") or
-        person.get("pitchHand", {}).get("type") or
-        person.get("throws")
-    )
-    throws = (throws or "").upper()
-    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws, "Unknown")
-
-    return pitcher_hand
-
-@st.cache_data(ttl=86400)
-def get_batter_vs_hand(batter_id):
-    vs_l = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="L")
-    vs_r = api_get(f"/people/{batter_id}/stats", stats="career", group="hitting", opposingPlayerHand="R")
-    
-    l_avg = l_ops = ".000"
-    r_avg = r_ops = ".000"
-    for stat in vs_l.get("stats", []):
-        for split in stat.get("splits", []):
-            s = split.get("stat", {})
-            l_avg = s.get("avg", ".000")
-            l_ops = s.get("ops", ".000")
-    for stat in vs_r.get("stats", []):
-        for split in stat.get("splits", []):
-            s = split.get("stat", {})
-            r_avg = s.get("avg", ".000")
-            r_ops = s.get("ops", ".000")
-    return l_avg, l_ops, r_avg, r_ops
-
-@st.cache_data(ttl=3600)
-def get_recent_batter_stats(batter_id):
-    season = date.today().year
-    data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
-    last_20_hits = 0
-    last_20_ab = 0
-    streak = 0
-    current_streak = 0
-
-    games = []
-    for sg in data.get("stats", []):
-        games.extend(sg.get("splits", []))
-
-    games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
-
-    for game in games:
-        stat = game.get("stat", {})
-        ab = stat.get("atBats", 0)
-        hits = stat.get("hits", 0)
-
-        if last_20_ab < 20:
-            needed = 20 - last_20_ab
-            add_ab = min(ab, needed)
-            last_20_ab += add_ab
-            last_20_hits += min(hits, add_ab)
-
-        if hits > 0:
-            current_streak += 1
-        else:
-            current_streak = 0
-        streak = max(streak, current_streak)
-
-    last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
-    return last_20_str, streak
-
 def api_get(path, **params):
     for attempt in range(1, 4):
         try:
@@ -113,6 +27,74 @@ def api_get(path, **params):
                 return {}
             time.sleep(2 ** attempt)
     return {}
+
+@st.cache_data(ttl=86400)
+def get_player_handedness(player_id):
+    data = api_get(f"/people/{player_id}")
+    person = data.get("people", [{}])[0]
+    bats = person.get("batSide", {}).get("code", "") or person.get("bats", "")
+    throws = person.get("pitchHand", {}).get("code", "") or person.get("throws", "")
+    batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats.upper(), "Unknown")
+    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
+    return batter_hand, pitcher_hand
+
+@st.cache_data(ttl=86400)
+def get_batter_vs_hand(batter_id):
+    data = api_get(
+        f"/people/{batter_id}/stats",
+        stats="careerStatSplits",
+        group="hitting",
+        sitCodes="vl,vr",
+        sportId=1
+    )
+    l_avg = l_ops = ".000"
+    r_avg = r_ops = ".000"
+    for stat in data.get("stats", []):
+        for split in stat.get("splits", []):
+            hand = split.get("split", {}).get("code", "")
+            s = split.get("stat", {})
+            if hand == "vl":
+                l_avg = s.get("avg", ".000")
+                l_ops = s.get("ops", ".000")
+            elif hand == "vr":
+                r_avg = s.get("avg", ".000")
+                r_ops = s.get("ops", ".000")
+    return l_avg, l_ops, r_avg, r_ops
+
+@st.cache_data(ttl=3600)
+def get_recent_batter_stats(batter_id):
+    season = date.today().year
+    data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
+    last_20_hits = 0
+    last_20_ab = 0
+
+    games = []
+    for sg in data.get("stats", []):
+        games.extend(sg.get("splits", []))
+
+    games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
+
+    current_streak = 0
+    for game in games:
+        stat = game.get("stat", {})
+        ab = stat.get("atBats", 0)
+        hits = stat.get("hits", 0)
+
+        if last_20_ab < 20:
+            needed = 20 - last_20_ab
+            add_ab = min(ab, needed)
+            last_20_ab += add_ab
+            last_20_hits += min(hits, add_ab)
+
+        # Streak: walk through newest-first, break at first hitless game
+        if ab > 0:  # only count games with plate appearances
+            if hits > 0:
+                current_streak += 1
+            else:
+                break
+
+    last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
+    return last_20_str, current_streak
 
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
@@ -165,6 +147,7 @@ def fetch_bvp(batter_id, pitcher_id):
         "ops": best.get("ops", ".000")
     }
 
+# ── Generate BvP DataFrame ─────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
     fetch_time = datetime.now().strftime("%H:%M:%S")
@@ -206,8 +189,11 @@ def generate_bvp_dataframe():
                         continue
                     
                     last_20_ab, streak = get_recent_batter_stats(bid)
-                    batter_hand = get_player_handedness(bid)   # batter hand only
-                    pitcher_hand = get_pitcher_hand(sp_id)    # updated pitcher hand
+
+                    # ✅ Correct batter and pitcher hand fetch
+                    batter_hand, _ = get_player_handedness(bid)
+                    _, pitcher_hand = get_player_handedness(sp_id)
+
                     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
                     
                     key = (bid, sp_id)
@@ -239,14 +225,14 @@ def generate_bvp_dataframe():
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
+# ── Fetch Data ───────────────────────────────────────────────────────────────
 data = generate_bvp_dataframe()
 
 if 'last_fetched' in st.session_state:
     st.info(f"📅 Data last fetched at: **{st.session_state['last_fetched']}**")
 
-# ── FILTERS ─────────────────────────────────────────────────
+# ── FILTERS ─────────────────────────────────────────────────────────────────
 st.sidebar.header("🔎 Filters")
-
 batter_search = st.sidebar.text_input("Search Batter", "")
 
 batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
@@ -272,7 +258,7 @@ if selected_batter_hand:
 if selected_pitcher_hand:
     filtered_data = filtered_data[filtered_data["Pitcher Hand"].isin(selected_pitcher_hand)]
 
-# ── Display ─────────────────────────────────────────────────
+# ── Display ─────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("All Batter vs. Pitcher Matchups")
@@ -297,10 +283,9 @@ def color_ops(val):
 styled = filtered_data.style\
     .map(color_ops, subset=["OPS"])\
     .set_properties(**{'text-align': 'center'})\
-    .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'),
-                                                    ('color', 'white'),
+    .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'), 
+                                                    ('color', 'white'), 
                                                     ('font-weight', 'bold')]}])
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
-
 st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250)")
