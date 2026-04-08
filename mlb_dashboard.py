@@ -5,20 +5,18 @@ Default filter: AB > 10 and AVG > .250
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import date, datetime
 import time
-import zoneinfo
+import pytz
 
-# ── TIMEZONE ───────────────────────────────────────────────────────────────
-ET = zoneinfo.ZoneInfo("America/New_York")
-
-# ── PAGE SETUP ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
-st.title("⚾ All Batter vs. Pitcher Matchups")
-st.caption(f"Full BvP Data — Live from MLB API • {datetime.now(ET).strftime('%B %d, %Y')}")
 
-# ── CONFIGURATION ───────────────────────────────────────────────────────────
+st.title("⚾ All Batter vs. Pitcher Matchups")
+st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B %d, %Y')}")
+
+# ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
+ET = pytz.timezone("US/Eastern")
 
 def api_get(path, **params):
     for attempt in range(1, 4):
@@ -34,17 +32,23 @@ def api_get(path, **params):
 
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
-    """Get batter and pitcher hands"""
+    """Fetch batter hand only"""
     data = api_get(f"/people/{player_id}")
     person = data.get("people", [{}])[0]
-
     bats = person.get("batSide", {}).get("code", "") or person.get("bats", "")
-    throws = person.get("pitchHand", {}).get("code", "") or person.get("throws", "")
-
     batter_hand = {"R": "Right", "L": "Left", "S": "Switch"}.get(bats.upper(), "Unknown")
-    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
+    return batter_hand
 
-    return batter_hand, pitcher_hand
+@st.cache_data(ttl=86400)
+def get_pitcher_hand(pitcher_id):
+    """Fetch pitcher throwing hand correctly"""
+    if not pitcher_id:
+        return "Unknown"
+    data = api_get(f"/people/{pitcher_id}")
+    person = data.get("people", [{}])[0]
+    throws = person.get("pitchHand", {}).get("code", "") or person.get("throws", "")
+    pitcher_hand = {"R": "Right", "L": "Left"}.get(throws.upper(), "Unknown")
+    return pitcher_hand
 
 @st.cache_data(ttl=86400)
 def get_batter_vs_hand(batter_id):
@@ -71,8 +75,7 @@ def get_batter_vs_hand(batter_id):
 
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
-    """Calculate last 20 ABs and hitting streak"""
-    season = datetime.now(ET).year
+    season = date.today().year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
     last_20_hits = 0
     last_20_ab = 0
@@ -81,36 +84,30 @@ def get_recent_batter_stats(batter_id):
     for sg in data.get("stats", []):
         games.extend(sg.get("splits", []))
 
-    # Sort newest first
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
 
-    streak = 0
     current_streak = 0
-
     for game in games:
         stat = game.get("stat", {})
         ab = stat.get("atBats", 0)
         hits = stat.get("hits", 0)
 
-        # Last 20 AB calculation
         if last_20_ab < 20:
             needed = 20 - last_20_ab
             add_ab = min(ab, needed)
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        # Hitting streak: only consecutive games with hits
-        if ab > 0:
+        # Streak: walk through newest-first, break at first hitless game
+        if ab > 0:  # only count games with plate appearances
             if hits > 0:
                 current_streak += 1
             else:
-                current_streak = 0
-        streak = max(streak, current_streak)
+                break
 
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
-    return last_20_str, streak
+    return last_20_str, current_streak
 
-# ── MLB API FUNCTIONS ──────────────────────────────────────────────────────
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date, hydrate="probablePitcher,lineups,team")
     games = []
@@ -127,7 +124,7 @@ def team_info(game, side):
     return t.get("name", "?"), t.get("id")
 
 def fetch_roster_batters(team_id):
-    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=datetime.now(ET).year)
+    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=date.today().year)
     batters = []
     for p in data.get("roster", []):
         if p.get("position", {}).get("type", "") != "Pitcher":
@@ -162,10 +159,9 @@ def fetch_bvp(batter_id, pitcher_id):
         "ops": best.get("ops", ".000")
     }
 
-# ── GENERATE DATAFRAME ─────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
-    fetch_time = datetime.now(ET).strftime("%H:%M:%S")
+    fetch_time = datetime.now(ET).strftime("%H:%M:%S ET")
     st.session_state['last_fetched'] = fetch_time
 
     with st.spinner("Fetching ALL BvP matchups..."):
@@ -188,10 +184,10 @@ def generate_bvp_dataframe():
             a_sp, a_sp_id = probable_pitcher(g, "away")
 
             sides = [
-                (away_name, away_id, h_sp, h_sp_id, home_name, "away"),
-                (home_name, home_id, a_sp, a_sp_id, away_name, "home"),
+                (away_name, away_id, h_sp, h_sp_id, home_name, "away", h_sp_id),
+                (home_name, home_id, a_sp, a_sp_id, away_name, "home", a_sp_id),
             ]
-            for bat_team, bat_team_id, sp_name, sp_id, pit_team, side_key in sides:
+            for bat_team, bat_team_id, sp_name, sp_id, pit_team, side_key, pitcher_id in sides:
                 if not sp_id:
                     continue
                 batters = fetch_roster_batters(bat_team_id)
@@ -204,7 +200,8 @@ def generate_bvp_dataframe():
                         continue
                     
                     last_20_ab, streak = get_recent_batter_stats(bid)
-                    batter_hand, pitcher_hand = get_player_handedness(bid)
+                    batter_hand = get_player_handedness(bid)
+                    pitcher_hand = get_pitcher_hand(sp_id)
                     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
                     
                     key = (bid, sp_id)
@@ -236,14 +233,14 @@ def generate_bvp_dataframe():
             df = df.sort_values(by="OPS", ascending=False).reset_index(drop=True)
         return df
 
-# ── LOAD DATA ─────────────────────────────────────────────────────────────
 data = generate_bvp_dataframe()
 
 if 'last_fetched' in st.session_state:
     st.info(f"📅 Data last fetched at: **{st.session_state['last_fetched']}**")
 
-# ── FILTERS ───────────────────────────────────────────────────────────────
+# ── FILTERS ─────────────────────────────────────────────────────────────────
 st.sidebar.header("🔎 Filters")
+
 batter_search = st.sidebar.text_input("Search Batter", "")
 
 batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
@@ -256,6 +253,7 @@ selected_pitcher_team = st.sidebar.multiselect("Pitcher Team", options=pitcher_t
 selected_batter_hand = st.sidebar.multiselect("Batter Hand", options=batter_hands, default=[])
 selected_pitcher_hand = st.sidebar.multiselect("Pitcher Hand", options=pitcher_hands, default=[])
 
+# Apply filters
 filtered_data = data.copy()
 if batter_search:
     filtered_data = filtered_data[filtered_data["Batter"].str.contains(batter_search, case=False, na=False)]
@@ -268,7 +266,7 @@ if selected_batter_hand:
 if selected_pitcher_hand:
     filtered_data = filtered_data[filtered_data["Pitcher Hand"].isin(selected_pitcher_hand)]
 
-# ── DISPLAY ───────────────────────────────────────────────────────────────
+# ── Display ─────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("All Batter vs. Pitcher Matchups")
@@ -298,4 +296,5 @@ styled = filtered_data.style\
                                                     ('font-weight', 'bold')]}])
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
+
 st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250)")
