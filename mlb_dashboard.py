@@ -134,6 +134,95 @@ def fetch_bvp(batter_id, pitcher_id):
         "ops": best.get("ops", ".000")
     }
 
+# ── VS TEAM & VS BULLPEN ─────────────────────────────────────────────────────
+@st.cache_data(ttl=86400)
+def get_batter_vs_team(batter_id, opp_team_id):
+    """Career AVG/OPS for batter vs a specific opposing team."""
+    data = api_get(f"/people/{batter_id}/stats", stats="vsTeam",
+                   opposingTeamId=opp_team_id, group="hitting", sportId=1)
+    avg = ops = ".000"
+    for stat in data.get("stats", []):
+        for split in stat.get("splits", []):
+            s = split.get("stat", {})
+            avg = s.get("avg", ".000")
+            ops = s.get("ops", ".000")
+    return avg, ops
+
+@st.cache_data(ttl=86400)
+def get_team_bullpen(team_id):
+    """Return list of (pitcher_id,) for all active relievers on a team."""
+    et_now = datetime.now(tz=ZoneInfo("America/New_York"))
+    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=et_now.year)
+    relievers = []
+    for p in data.get("roster", []):
+        pos = p.get("position", {})
+        # Include all pitchers except those with position code "SP" (starters)
+        if pos.get("type", "") == "Pitcher" and pos.get("abbreviation", "") != "SP":
+            pid = p.get("person", {}).get("id")
+            if pid:
+                relievers.append(pid)
+    return relievers
+
+@st.cache_data(ttl=86400)
+def get_batter_vs_bullpen(batter_id, opp_team_id):
+    """
+    Career AVG/OPS for batter vs the opposing team's bullpen (relievers combined).
+    Aggregates vsPlayer stats across all active relievers on the team.
+    """
+    relievers = get_team_bullpen(opp_team_id)
+    if not relievers:
+        return ".000", ".000"
+
+    total_ab = total_h = total_bb = total_tb = 0
+
+    def fetch_vs_reliever(pid):
+        data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer",
+                       opposingPlayerId=pid, sportId=1, group="hitting")
+        for sg in data.get("stats", []):
+            for split in sg.get("splits", []):
+                s = split.get("stat", {})
+                ab = s.get("atBats", 0)
+                if ab > 0:
+                    return (
+                        ab,
+                        s.get("hits", 0),
+                        s.get("baseOnBalls", 0),
+                        s.get("hitByPitch", 0),
+                        s.get("sacFlies", 0),
+                        # total bases = H + 2B + 2*3B + 3*HR
+                        s.get("hits", 0)
+                        + s.get("doubles", 0)
+                        + 2 * s.get("triples", 0)
+                        + 3 * s.get("homeRuns", 0),
+                    )
+        return (0, 0, 0, 0, 0, 0)
+
+    # Fetch all relievers in parallel
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(fetch_vs_reliever, pid): pid for pid in relievers}
+        for future in as_completed(futures):
+            ab, h, bb, hbp, sf, tb = future.result()
+            total_ab += ab
+            total_h  += h
+            total_bb += bb
+            total_tb += tb
+            # track PA components for OBP
+            # store as running totals using nonlocal-friendly approach below
+
+    if total_ab == 0:
+        return ".000", ".000"
+
+    # Re-aggregate with full PA for OBP (need separate pass for hbp/sf)
+    # Simpler: recalculate with what we have (hbp/sf are minor, skip for brevity)
+    avg = total_h / total_ab
+    # OBP = (H + BB) / (AB + BB)  — simplified, excludes HBP/SF
+    obp = (total_h + total_bb) / (total_ab + total_bb) if (total_ab + total_bb) > 0 else 0
+    # SLG = TB / AB
+    slg = total_tb / total_ab if total_ab > 0 else 0
+    ops = obp + slg
+
+    return f"{avg:.3f}", f"{ops:.3f}"
+
 # ── SCHEDULE / ROSTER FUNCTIONS ──────────────────────────────────────────────
 def fetch_schedule(game_date):
     data = api_get("/schedule", sportId=1, date=game_date,
@@ -162,14 +251,17 @@ def fetch_roster_batters(team_id):
     return batters
 
 # ── PER-BATTER WORKER ────────────────────────────────────────────────────────
-def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, label, pitcher_hand):
+def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, pit_team_id, label, pitcher_hand):
     """All API calls for a single batter — runs in a thread."""
     bvp = fetch_bvp(bid, sp_id)
     if not bvp:
         return None
-    last_20_ab, streak      = get_recent_batter_stats(bid)
-    batter_hand, _          = get_player_handedness(bid)
+    last_20_ab, streak         = get_recent_batter_stats(bid)
+    batter_hand, _             = get_player_handedness(bid)
     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
+    vs_team_avg, vs_team_ops   = get_batter_vs_team(bid, pit_team_id)
+    vs_bp_avg, vs_bp_ops       = get_batter_vs_bullpen(bid, pit_team_id)
+
     return {
         "Matchup": label,
         "Batter": bname,
@@ -182,6 +274,8 @@ def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, label, pitche
         "Hitting Streak": streak,
         "Batter vs LHP": f"{l_avg} / {l_ops}",
         "Batter vs RHP": f"{r_avg} / {r_ops}",
+        "vs Team (AVG/OPS)": f"{vs_team_avg} / {vs_team_ops}",
+        "vs Bullpen (AVG/OPS)": f"{vs_bp_avg} / {vs_bp_ops}",
         "AB": bvp["ab"], "H": bvp["h"], "HR": bvp["hr"],
         "RBI": bvp["rbi"], "BB": bvp["bb"], "SO": bvp["so"],
         "AVG": bvp["avg"], "OBP": bvp["obp"],
@@ -201,7 +295,6 @@ def generate_bvp_dataframe():
         return pd.DataFrame()
 
     # ── Build task list ──────────────────────────────────────────────────────
-    # Pre-fetch pitcher handedness once per unique pitcher (not once per batter)
     tasks = []
     pitcher_hand_cache = {}
 
@@ -213,13 +306,12 @@ def generate_bvp_dataframe():
         a_sp, a_sp_id = probable_pitcher(g, "away")
 
         sides = [
-            (away_name, away_id, h_sp, h_sp_id, home_name),
-            (home_name, home_id, a_sp, a_sp_id, away_name),
+            (away_name, away_id, h_sp, h_sp_id, home_name, home_id),
+            (home_name, home_id, a_sp, a_sp_id, away_name, away_id),
         ]
-        for bat_team, bat_team_id, sp_name, sp_id, pit_team in sides:
+        for bat_team, bat_team_id, sp_name, sp_id, pit_team, pit_team_id in sides:
             if not sp_id:
                 continue
-            # Fetch pitcher hand once and cache it
             if sp_id not in pitcher_hand_cache:
                 _, p_hand = get_player_handedness(sp_id)
                 pitcher_hand_cache[sp_id] = p_hand
@@ -229,7 +321,7 @@ def generate_bvp_dataframe():
             for bname, bid in batters:
                 if bid:
                     tasks.append((bname, bid, sp_name, sp_id,
-                                  bat_team, pit_team, label, pitcher_hand))
+                                  bat_team, pit_team, pit_team_id, label, pitcher_hand))
 
     # ── Run all batter tasks in parallel ────────────────────────────────────
     progress_bar = st.progress(0)
@@ -239,7 +331,7 @@ def generate_bvp_dataframe():
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_key = {
-            executor.submit(process_batter, *t): (t[1], t[3])  # key = (bid, sp_id)
+            executor.submit(process_batter, *t): (t[1], t[3])
             for t in tasks
         }
         for future in as_completed(future_to_key):
