@@ -5,14 +5,17 @@ Default filter: AB > 10 and AVG > .250
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import date, datetime
+from datetime import datetime
 from zoneinfo import ZoneInfo  # For Eastern Time
 import time
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
 
 st.title("⚾ All Batter vs. Pitcher Matchups")
-st.caption(f"Full BvP Data — Live from MLB API • {date.today().strftime('%B %d, %Y')}")
+
+# Display ET date in header
+et_now = datetime.now(tz=ZoneInfo("America/New_York"))
+st.caption(f"Full BvP Data — Live from MLB API • {et_now.strftime('%B %d, %Y')} ET")
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
@@ -64,7 +67,7 @@ def get_batter_vs_hand(batter_id):
 
 @st.cache_data(ttl=3600)
 def get_recent_batter_stats(batter_id):
-    season = date.today().year
+    season = et_now.year
     data = api_get(f"/people/{batter_id}/stats", stats="gameLog", group="hitting", season=season)
     last_20_hits = 0
     last_20_ab = 0
@@ -87,7 +90,7 @@ def get_recent_batter_stats(batter_id):
             last_20_ab += add_ab
             last_20_hits += min(hits, add_ab)
 
-        if ab > 0:  # only count games with plate appearances
+        if ab > 0:
             if hits > 0:
                 current_streak += 1
             else:
@@ -112,7 +115,7 @@ def team_info(game, side):
     return t.get("name", "?"), t.get("id")
 
 def fetch_roster_batters(team_id):
-    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=date.today().year)
+    data = api_get(f"/teams/{team_id}/roster", rosterType="active", season=et_now.year)
     batters = []
     for p in data.get("roster", []):
         if p.get("position", {}).get("type", "") != "Pitcher":
@@ -149,15 +152,15 @@ def fetch_bvp(batter_id, pitcher_id):
 
 @st.cache_data(ttl=1800)
 def generate_bvp_dataframe():
-    # ✅ Pull current time in Eastern Time
-    fetch_time = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%H:%M:%S")
-    st.session_state['last_fetched'] = fetch_time
+    # ✅ Use ET for fetch time and date
+    et_now = datetime.now(tz=ZoneInfo("America/New_York"))
+    st.session_state['last_fetched'] = et_now.strftime("%H:%M:%S")
 
     with st.spinner("Fetching ALL BvP matchups..."):
-        game_date = date.today().isoformat()
+        game_date = et_now.date().isoformat()  # <-- MLB API uses ET date
         games = fetch_schedule(game_date)
         if not games:
-            st.error("No games found today.")
+            st.error(f"No games found for {game_date}.")
             return pd.DataFrame()
 
         matchup_dict = {}
@@ -187,12 +190,12 @@ def generate_bvp_dataframe():
                     bvp = fetch_bvp(bid, sp_id)
                     if not bvp:
                         continue
-                    
+
                     last_20_ab, streak = get_recent_batter_stats(bid)
-                    batter_hand, _ = get_player_handedness(bid)       # Correct batter hand
-                    _, pitcher_hand = get_player_handedness(sp_id)   # Correct pitcher hand
+                    batter_hand, _ = get_player_handedness(bid)
+                    _, pitcher_hand = get_player_handedness(sp_id)
                     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
-                    
+
                     key = (bid, sp_id)
                     matchup_dict[key] = {
                         "Matchup": label,
@@ -229,7 +232,6 @@ if 'last_fetched' in st.session_state:
 
 # ── FILTERS ─────────────────────────────────────────────────────────────────
 st.sidebar.header("🔎 Filters")
-
 batter_search = st.sidebar.text_input("Search Batter", "")
 
 batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
@@ -255,7 +257,7 @@ if selected_batter_hand:
 if selected_pitcher_hand:
     filtered_data = filtered_data[filtered_data["Pitcher Hand"].isin(selected_pitcher_hand)]
 
-# ── Display ─────────────────────────────────────────────────────────────────
+# ── DISPLAY ─────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
     st.subheader("All Batter vs. Pitcher Matchups")
@@ -285,5 +287,4 @@ styled = filtered_data.style\
                                                     ('font-weight', 'bold')]}])
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
-
 st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250)")
