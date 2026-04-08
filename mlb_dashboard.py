@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 st.set_page_config(page_title="MLB Daily BvP", page_icon="⚾", layout="wide")
@@ -15,6 +16,7 @@ st.title("⚾ All Batter vs. Pitcher Matchups")
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
 CACHE_TTL_SECONDS = 600  # 10 minutes
+MAX_WORKERS = 20          # concurrent API threads
 
 def api_get(path, **params):
     """Fetch data from MLB API with retries"""
@@ -70,8 +72,6 @@ def get_recent_batter_stats(batter_id):
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
 
     # ── Pass 1: Last 20 AB ──
-    # Walk newest-to-oldest, accumulate full game AB until we reach 20.
-    # Skip games with 0 AB (walk/HBP-only appearances).
     last_20_hits = 0
     last_20_ab = 0
     for game in games:
@@ -87,14 +87,12 @@ def get_recent_batter_stats(batter_id):
             last_20_ab += ab
             last_20_hits += hits
         else:
-            # Only need a partial game to reach 20 — prorate hits
             last_20_hits += round(hits * remaining / ab)
             last_20_ab += remaining
 
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
 
     # ── Pass 2: Hitting streak ──
-    # Walk newest-to-oldest, count consecutive games with a hit (AB > 0 only).
     current_streak = 0
     for game in games:
         stat = game.get("stat", {})
@@ -104,9 +102,37 @@ def get_recent_batter_stats(batter_id):
             if hits > 0:
                 current_streak += 1
             else:
-                break  # streak ends at first hitless game with AB
+                break
 
     return last_20_str, current_streak
+
+@st.cache_data(ttl=3600)
+def fetch_bvp(batter_id, pitcher_id):
+    data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer",
+                   opposingPlayerId=pitcher_id, sportId=1, group="hitting")
+    best = None
+    max_ab = -1
+    for sg in data.get("stats", []):
+        for split in sg.get("splits", []):
+            stat = split.get("stat", {})
+            ab = stat.get("atBats", 0)
+            if ab > max_ab:
+                max_ab = ab
+                best = stat
+    if best is None or max_ab == 0:
+        return None
+    return {
+        "ab": best.get("atBats", 0),
+        "h": best.get("hits", 0),
+        "hr": best.get("homeRuns", 0),
+        "rbi": best.get("rbi", 0),
+        "bb": best.get("baseOnBalls", 0),
+        "so": best.get("strikeOuts", 0),
+        "avg": best.get("avg", ".000"),
+        "obp": best.get("obp", ".000"),
+        "slg": best.get("slg", ".000"),
+        "ops": best.get("ops", ".000")
+    }
 
 # ── SCHEDULE / ROSTER FUNCTIONS ──────────────────────────────────────────────
 def fetch_schedule(game_date):
@@ -135,31 +161,32 @@ def fetch_roster_batters(team_id):
             batters.append((person.get("fullName", "?"), person.get("id")))
     return batters
 
-def fetch_bvp(batter_id, pitcher_id):
-    data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer",
-                   opposingPlayerId=pitcher_id, sportId=1, group="hitting")
-    best = None
-    max_ab = -1
-    for sg in data.get("stats", []):
-        for split in sg.get("splits", []):
-            stat = split.get("stat", {})
-            ab = stat.get("atBats", 0)
-            if ab > max_ab:
-                max_ab = ab
-                best = stat
-    if best is None or max_ab == 0:
+# ── PER-BATTER WORKER ────────────────────────────────────────────────────────
+def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, label, pitcher_hand):
+    """All API calls for a single batter — runs in a thread."""
+    bvp = fetch_bvp(bid, sp_id)
+    if not bvp:
         return None
+    last_20_ab, streak      = get_recent_batter_stats(bid)
+    batter_hand, _          = get_player_handedness(bid)
+    l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
     return {
-        "ab": best.get("atBats", 0),
-        "h": best.get("hits", 0),
-        "hr": best.get("homeRuns", 0),
-        "rbi": best.get("rbi", 0),
-        "bb": best.get("baseOnBalls", 0),
-        "so": best.get("strikeOuts", 0),
-        "avg": best.get("avg", ".000"),
-        "obp": best.get("obp", ".000"),
-        "slg": best.get("slg", ".000"),
-        "ops": best.get("ops", ".000")
+        "Matchup": label,
+        "Batter": bname,
+        "Batter Hand": batter_hand,
+        "Batter Team": bat_team,
+        "Opposing Pitcher": sp_name,
+        "Pitcher Hand": pitcher_hand,
+        "Pitcher Team": pit_team,
+        "Last 20 AB": last_20_ab,
+        "Hitting Streak": streak,
+        "Batter vs LHP": f"{l_avg} / {l_ops}",
+        "Batter vs RHP": f"{r_avg} / {r_ops}",
+        "AB": bvp["ab"], "H": bvp["h"], "HR": bvp["hr"],
+        "RBI": bvp["rbi"], "BB": bvp["bb"], "SO": bvp["so"],
+        "AVG": bvp["avg"], "OBP": bvp["obp"],
+        "SLG": bvp["slg"], "OPS": bvp["ops"],
+        "Lineup?": "Projected"
     }
 
 # ── GENERATE BVP DATAFRAME ───────────────────────────────────────────────────
@@ -173,10 +200,10 @@ def generate_bvp_dataframe():
         st.error(f"No games found for {game_date}.")
         return pd.DataFrame()
 
-    matchup_dict = {}
-    progress_bar = st.progress(0)
-    total = len(games) * 2
-    count = 0
+    # ── Build task list ──────────────────────────────────────────────────────
+    # Pre-fetch pitcher handedness once per unique pitcher (not once per batter)
+    tasks = []
+    pitcher_hand_cache = {}
 
     for g in games:
         home_name, home_id = team_info(g, "home")
@@ -186,47 +213,47 @@ def generate_bvp_dataframe():
         a_sp, a_sp_id = probable_pitcher(g, "away")
 
         sides = [
-            (away_name, away_id, h_sp, h_sp_id, home_name, "away"),
-            (home_name, home_id, a_sp, a_sp_id, away_name, "home"),
+            (away_name, away_id, h_sp, h_sp_id, home_name),
+            (home_name, home_id, a_sp, a_sp_id, away_name),
         ]
-        for bat_team, bat_team_id, sp_name, sp_id, pit_team, side_key in sides:
+        for bat_team, bat_team_id, sp_name, sp_id, pit_team in sides:
             if not sp_id:
                 continue
+            # Fetch pitcher hand once and cache it
+            if sp_id not in pitcher_hand_cache:
+                _, p_hand = get_player_handedness(sp_id)
+                pitcher_hand_cache[sp_id] = p_hand
+            pitcher_hand = pitcher_hand_cache[sp_id]
+
             batters = fetch_roster_batters(bat_team_id)
             for bname, bid in batters:
-                if not bid:
-                    continue
-                bvp = fetch_bvp(bid, sp_id)
-                if not bvp:
-                    continue
-                last_20_ab, streak = get_recent_batter_stats(bid)
-                batter_hand, _ = get_player_handedness(bid)
-                _, pitcher_hand = get_player_handedness(sp_id)
-                l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
+                if bid:
+                    tasks.append((bname, bid, sp_name, sp_id,
+                                  bat_team, pit_team, label, pitcher_hand))
 
-                key = (bid, sp_id)
-                matchup_dict[key] = {
-                    "Matchup": label,
-                    "Batter": bname,
-                    "Batter Hand": batter_hand,
-                    "Batter Team": bat_team,
-                    "Opposing Pitcher": sp_name,
-                    "Pitcher Hand": pitcher_hand,
-                    "Pitcher Team": pit_team,
-                    "Last 20 AB": last_20_ab,
-                    "Hitting Streak": streak,
-                    "Batter vs LHP": f"{l_avg} / {l_ops}",
-                    "Batter vs RHP": f"{r_avg} / {r_ops}",
-                    "AB": bvp["ab"], "H": bvp["h"], "HR": bvp["hr"],
-                    "RBI": bvp["rbi"], "BB": bvp["bb"], "SO": bvp["so"],
-                    "AVG": bvp["avg"], "OBP": bvp["obp"],
-                    "SLG": bvp["slg"], "OPS": bvp["ops"],
-                    "Lineup?": "Projected"
-                }
-            count += 1
-            progress_bar.progress(min(count / total, 1.0))
+    # ── Run all batter tasks in parallel ────────────────────────────────────
+    progress_bar = st.progress(0)
+    total = len(tasks)
+    results = {}
+    completed = 0
 
-    df = pd.DataFrame(matchup_dict.values())
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_key = {
+            executor.submit(process_batter, *t): (t[1], t[3])  # key = (bid, sp_id)
+            for t in tasks
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                row = future.result()
+                if row:
+                    results[key] = row
+            except Exception:
+                pass
+            completed += 1
+            progress_bar.progress(min(completed / total, 1.0))
+
+    df = pd.DataFrame(results.values())
     if not df.empty:
         df["AVG"] = pd.to_numeric(df["AVG"], errors="coerce")
         df = df[(df["AB"] > 10) & (df["AVG"] > 0.250)]
