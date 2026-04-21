@@ -1,5 +1,5 @@
 """
-MLB Daily BvP Dashboard - Stable Version with Shared Cache + AI Hit Probability Model v2.0
+MLB Daily BvP Dashboard - Stable Version with Shared Cache + AI Hit Probability Model v3.0
 Default filter: AB > 10 and AVG > .250
 """
 import streamlit as st
@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
-st.set_page_config(page_title="MLB Daily BvP + AI Hit Prob v2", page_icon="⚾", layout="wide")
-st.title("⚾ All Batter vs. Pitcher Matchups + AI Hit Probability v2.0")
+st.set_page_config(page_title="MLB Daily BvP + AI Hit Prob v3", page_icon="⚾", layout="wide")
+st.title("⚾ All Batter vs. Pitcher Matchups + AI Hit Probability v3.0")
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
@@ -68,7 +68,6 @@ def get_recent_batter_stats(batter_id):
     for sg in data.get("stats", []):
         games.extend(sg.get("splits", []))
     games = sorted(games, key=lambda x: x.get("date", ""), reverse=True)
-
     # Last 20 AB
     last_20_hits = 0
     last_20_ab = 0
@@ -88,7 +87,7 @@ def get_recent_batter_stats(batter_id):
             last_20_hits += round(hits * remaining / ab)
             last_20_ab += remaining
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
-    
+   
     # Hitting streak
     current_streak = 0
     for game in games:
@@ -130,15 +129,14 @@ def fetch_bvp(batter_id, pitcher_id):
         "ops": best.get("ops", ".000")
     }
 
-# ── NEW METRICS FOR REFINED MODEL v2.0 ──────────────────────────────────────
+# ── NEW METRICS FOR REFINED MODEL (unchanged) ───────────────────────────────
 @st.cache_data(ttl=3600)
 def get_pitcher_velocity_and_whip(pitcher_id):
-    """Returns current WHIP and average fastball velocity (mph). Uses statcast endpoint where available."""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     data = api_get(f"/people/{pitcher_id}/stats", stats="statcast,season", group="pitching", season=season)
     whip = 1.32
-    avg_velo = 93.5  # 2026 MLB average fallback
+    avg_velo = 93.5
     for sg in data.get("stats", []):
         for split in sg.get("splits", []):
             stat = split.get("stat", {})
@@ -150,7 +148,6 @@ def get_pitcher_velocity_and_whip(pitcher_id):
 
 @st.cache_data(ttl=3600)
 def get_batter_statcast_metrics(batter_id):
-    """Pulls xBA, hard-hit rate, and average exit velocity from advanced/statcast data (2026 API support)."""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     data = api_get(f"/people/{batter_id}/stats", stats="statcast,advanced", group="hitting", season=season)
@@ -168,32 +165,26 @@ def get_batter_statcast_metrics(batter_id):
                 avg_ev = float(stat.get("avgExitVelocity"))
     return xba, hard_hit_pct, avg_ev
 
-# ── UPDATED AI Hit Probability Model v2.0 ───────────────────────────────────
-def calculate_hit_probability_v2(matchup_ba: float, recent_ba: float,
+# ── OPTIMIZED AI Hit Probability Model v3.0 ─────────────────────────────────
+def calculate_hit_probability_v3(matchup_ba: float, recent_ba: float,
                                  pitcher_whip: float, pitcher_velo: float,
                                  batter_xba: float, batter_hard_hit_pct: float,
                                  batter_hand: str, pitcher_hand: str,
                                  batter_avg_ev: float) -> float:
     """
-    Refined model v2.0 incorporating the new metrics you requested:
-    - 40% historical BvP
-    - 25% recent form
-    - 15% xBA (quality of contact)
-    - 10% hard-hit rate + exit velocity
-    - 5% pitcher WHIP
-    - 3% velocity differential
-    - 2% platoon
+    Optimized AI Hit Probability Model v3.0
+    Weights: 30% xBA, 20% BvP, 15% recent form, 15% quality-of-contact,
+    8% WHIP, 5% velocity differential, 2% platoon
     """
     # Weighted base
-    base = (matchup_ba * 0.40) + (recent_ba * 0.25) + (batter_xba * 0.15)
+    base = (batter_xba * 0.30) + (matchup_ba * 0.20) + (recent_ba * 0.15)
 
-    # Quality-of-contact boost
+    # Quality-of-contact adjustment
     contact_adjust = ((batter_hard_hit_pct - 0.38) * 0.12) + ((batter_avg_ev - 88.5) * 0.008)
 
-    # Pitcher difficulty
-    whip_adjust = (1.32 - pitcher_whip) * 0.05
-    # Velocity differential (higher velo = harder for hitter)
-    velo_diff = (pitcher_velo - 93.5) * -0.003
+    # Pitcher difficulty adjustments
+    whip_adjust = (1.32 - pitcher_whip) * 0.08
+    velo_diff = (pitcher_velo - 93.5) * -0.0035
 
     # Platoon
     is_opposite = False
@@ -241,7 +232,6 @@ def get_batter_vs_bullpen(batter_id, opp_team_id):
     if not relievers:
         return ".000", ".000"
     total_ab = total_h = total_bb = total_tb = 0
-
     def fetch_vs_reliever(pid):
         data = api_get(f"/people/{batter_id}/stats", stats="vsPlayer",
                        opposingPlayerId=pid, sportId=1, group="hitting")
@@ -259,7 +249,6 @@ def get_batter_vs_bullpen(batter_id, opp_team_id):
                         s.get("hits", 0) + s.get("doubles", 0) + 2 * s.get("triples", 0) + 3 * s.get("homeRuns", 0),
                     )
         return (0, 0, 0, 0, 0, 0)
-
     with ThreadPoolExecutor(max_workers=10) as ex:
         futures = {ex.submit(fetch_vs_reliever, pid): pid for pid in relievers}
         for future in as_completed(futures):
@@ -268,7 +257,6 @@ def get_batter_vs_bullpen(batter_id, opp_team_id):
             total_h += h
             total_bb += bb
             total_tb += tb
-
     if total_ab == 0:
         return ".000", ".000"
     avg = total_h / total_ab
@@ -302,20 +290,18 @@ def fetch_roster_batters(team_id):
             batters.append((person.get("fullName", "?"), person.get("id")))
     return batters
 
-# ── UPDATED PER-BATTER WORKER ───────────────────────────────────────────────
+# ── UPDATED PER-BATTER WORKER (now using v3.0) ───────────────────────────────
 def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, pit_team_id, label, pitcher_hand):
-    """All API calls + new Statcast metrics + v2 probability calculation"""
     bvp = fetch_bvp(bid, sp_id)
     if not bvp:
         return None
-
     last_20_ab, streak = get_recent_batter_stats(bid)
     batter_hand, _ = get_player_handedness(bid)
     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
     vs_team_avg, vs_team_ops = get_batter_vs_team(bid, pit_team_id)
     vs_bp_avg, vs_bp_ops = get_batter_vs_bullpen(bid, pit_team_id)
 
-    # ── NEW METRICS ─────────────────────────────────────────────────────────
+    # NEW METRICS
     pitcher_whip, pitcher_velo = get_pitcher_velocity_and_whip(sp_id)
     batter_xba, batter_hard_hit_pct, batter_avg_ev = get_batter_statcast_metrics(bid)
 
@@ -331,8 +317,8 @@ def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, pit_team_id, 
         except:
             pass
 
-    # ── v2 Probability ──────────────────────────────────────────────────────
-    hit_prob = calculate_hit_probability_v2(
+    # ── v3.0 Probability ─────────────────────────────────────────────────────
+    hit_prob = calculate_hit_probability_v3(
         matchup_ba=matchup_ba,
         recent_ba=recent_ba,
         pitcher_whip=pitcher_whip,
@@ -366,11 +352,11 @@ def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, pit_team_id, 
         "Hard-Hit %": round(batter_hard_hit_pct * 100, 1),
         "Avg EV (mph)": round(batter_avg_ev, 1),
         "Pitcher Velo (mph)": round(pitcher_velo, 1),
-        "Est. Hit % (v2)": hit_prob,
+        "Est. Hit % (v3)": hit_prob,
         "Lineup?": "Projected"
     }
 
-# ── GENERATE BVP DATAFRAME (unchanged core) ────────────────────────────────
+# ── GENERATE BVP DATAFRAME (updated to use v3 column) ────────────────────────
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def generate_bvp_dataframe():
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
@@ -389,10 +375,8 @@ def generate_bvp_dataframe():
         label = f"{away_name} @ {home_name}"
         h_sp, h_sp_id = probable_pitcher(g, "home")
         a_sp, a_sp_id = probable_pitcher(g, "away")
-        sides = [
-            (away_name, away_id, h_sp, h_sp_id, home_name, home_id),
-            (home_name, home_id, a_sp, a_sp_id, away_name, away_id),
-        ]
+        sides = [(away_name, away_id, h_sp, h_sp_id, home_name, home_id),
+                 (home_name, home_id, a_sp, a_sp_id, away_name, away_id)]
         for bat_team, bat_team_id, sp_name, sp_id, pit_team, pit_team_id in sides:
             if not sp_id:
                 continue
@@ -427,7 +411,7 @@ def generate_bvp_dataframe():
     if not df.empty:
         df["AVG"] = pd.to_numeric(df["AVG"], errors="coerce")
         df = df[(df["AB"] > 10) & (df["AVG"] > 0.250)]
-        df = df.sort_values(by="Est. Hit % (v2)", ascending=False).reset_index(drop=True)
+        df = df.sort_values(by="Est. Hit % (v3)", ascending=False).reset_index(drop=True)
     return df
 
 # ── FETCH DATA ──────────────────────────────────────────────────────────────
@@ -463,7 +447,7 @@ if selected_pitcher_hand:
 # ── DISPLAY ─────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.subheader("All Batter vs. Pitcher Matchups + AI Hit Probability v2.0")
+    st.subheader("All Batter vs. Pitcher Matchups + AI Hit Probability v3.0")
 with col2:
     if st.button("🔄 Refresh All Data Now", type="primary"):
         st.cache_data.clear()
@@ -489,16 +473,16 @@ def color_hit_prob(val):
 
 styled = filtered_data.style\
     .map(color_ops, subset=["OPS"])\
-    .map(color_hit_prob, subset=["Est. Hit % (v2)"])\
+    .map(color_hit_prob, subset=["Est. Hit % (v3)"])\
     .set_properties(**{'text-align': 'center'})\
     .set_table_styles([{'selector': 'th', 'props': [('background-color', '#1F4E79'),
                                                     ('color', 'white'),
                                                     ('font-weight', 'bold')]}])
 
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
-st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250) | AI Hit Probability v2.0 active")
+st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250) | AI Hit Probability v3.0 active")
 st.caption("""
-**Est. Hit % (v2)** = refined probability using:  
-40% BvP + 25% recent form + 15% xBA + 10% hard-hit/exit velocity + 5% WHIP + 3% velocity differential + 2% platoon.  
-All new metrics pulled directly from the MLB Stats API.
+**Est. Hit % (v3)** = optimized probability using:  
+30% xBA + 20% BvP + 15% recent form + 15% hard-hit/exit velocity + 8% WHIP + 5% velocity differential + 2% platoon.  
+All metrics pulled directly from the MLB Stats API.
 """)
