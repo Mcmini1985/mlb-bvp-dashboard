@@ -6,7 +6,7 @@ Statcast metrics (xBA, hard-hit%, avg EV, pitcher velo) pulled from Baseball Sav
 import streamlit as st
 import pandas as pd
 import requests
-import io                                      # ← Fixed StringIO error
+import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,7 +36,6 @@ def api_get(path, **params):
 # ── FIXED: BASEBALL SAVANT STATCAST LEADERBOARDS ─────────────────────────────
 @st.cache_data(ttl=86400)
 def fetch_savant_batter_data():
-    """Improved fetch with proper headers (fixes connection refused)."""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     url = (
@@ -67,7 +66,6 @@ def fetch_savant_batter_data():
 
 @st.cache_data(ttl=86400)
 def fetch_savant_pitcher_data():
-    """Improved fetch with proper headers (fixes connection refused)."""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     url = (
