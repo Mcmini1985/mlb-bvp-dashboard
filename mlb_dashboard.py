@@ -16,7 +16,7 @@ st.title("⚾ All Batter vs. Pitcher Matchups + AI Hit Probability v3.0")
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 BASE = "https://statsapi.mlb.com/api/v1"
-CACHE_TTL_SECONDS = 600  # 10 minutes
+CACHE_TTL_SECONDS = 600
 MAX_WORKERS = 20
 
 def api_get(path, **params):
@@ -32,29 +32,27 @@ def api_get(path, **params):
             time.sleep(2 ** attempt)
     return {}
 
-# ── BASEBALL SAVANT STATCAST LEADERBOARDS ────────────────────────────────────
+# ── FIXED: BASEBALL SAVANT STATCAST LEADERBOARDS ─────────────────────────────
 @st.cache_data(ttl=86400)
 def fetch_savant_batter_data():
-    """
-    Pulls batter Statcast leaderboard from Baseball Savant (CSV export).
-    Returns dict keyed by player_id (int) with xba, hard_hit_percent, exit_velocity_avg.
-    Falls back to empty dict on any failure — callers use hardcoded defaults.
-    """
+    """Improved fetch with proper headers (fixes connection refused)."""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     url = (
         f"https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={season}&type=batter&filter=&min=25"
+        f"?year={season}&type=batter&filter=&min=5"
         f"&selections=xba,hard_hit_percent,exit_velocity_avg&csv=true"
     )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+    }
     try:
-        df = pd.read_csv(url)
-        # Savant uses 'player_id' as the MLB ID column
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        df = pd.read_csv(pd.compat.StringIO(resp.text))
         df = df.rename(columns={"player_id": "mlb_id"})
-        df["mlb_id"] = pd.to_numeric(df["mlb_id"], errors="coerce")
-        df = df.dropna(subset=["mlb_id"])
-        df["mlb_id"] = df["mlb_id"].astype(int)
-        # Normalize hard_hit_percent: Savant returns e.g. 42.3 (percent), convert to 0-1
+        df["mlb_id"] = pd.to_numeric(df["mlb_id"], errors="coerce").astype("Int64")
         if "hard_hit_percent" in df.columns:
             df["hard_hit_percent"] = pd.to_numeric(df["hard_hit_percent"], errors="coerce") / 100.0
         if "xba" in df.columns:
@@ -62,42 +60,38 @@ def fetch_savant_batter_data():
         if "exit_velocity_avg" in df.columns:
             df["exit_velocity_avg"] = pd.to_numeric(df["exit_velocity_avg"], errors="coerce")
         return df.set_index("mlb_id").to_dict("index")
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ Could not load batter Statcast data from Baseball Savant: {str(e)[:80]}")
         return {}
-
 
 @st.cache_data(ttl=86400)
 def fetch_savant_pitcher_data():
-    """
-    Pulls pitcher Statcast leaderboard from Baseball Savant (CSV export).
-    Returns dict keyed by player_id (int) with effective_speed (avg fastball velo).
-    Falls back to empty dict on any failure.
-    """
+    """Improved fetch with proper headers (fixes connection refused)."""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     url = (
         f"https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={season}&type=pitcher&filter=&min=25"
+        f"?year={season}&type=pitcher&filter=&min=5"
         f"&selections=effective_speed&csv=true"
     )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+    }
     try:
-        df = pd.read_csv(url)
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        df = pd.read_csv(pd.compat.StringIO(resp.text))
         df = df.rename(columns={"player_id": "mlb_id"})
-        df["mlb_id"] = pd.to_numeric(df["mlb_id"], errors="coerce")
-        df = df.dropna(subset=["mlb_id"])
-        df["mlb_id"] = df["mlb_id"].astype(int)
+        df["mlb_id"] = pd.to_numeric(df["mlb_id"], errors="coerce").astype("Int64")
         if "effective_speed" in df.columns:
             df["effective_speed"] = pd.to_numeric(df["effective_speed"], errors="coerce")
         return df.set_index("mlb_id").to_dict("index")
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ Could not load pitcher Statcast data from Baseball Savant: {str(e)[:80]}")
         return {}
 
-
 def get_batter_statcast(batter_id: int, savant_batters: dict) -> tuple[float, float, float]:
-    """
-    Look up xBA, hard-hit%, avg EV for a batter from the pre-fetched Savant dict.
-    Returns (xba, hard_hit_pct, avg_ev) with safe defaults when missing.
-    """
     row = savant_batters.get(batter_id, {})
     xba = row.get("xba")
     hard_hit = row.get("hard_hit_percent")
@@ -108,21 +102,14 @@ def get_batter_statcast(batter_id: int, savant_batters: dict) -> tuple[float, fl
         float(avg_ev) if avg_ev is not None and not pd.isna(avg_ev) else 88.5,
     )
 
-
 def get_pitcher_statcast(pitcher_id: int, savant_pitchers: dict) -> float:
-    """
-    Look up avg fastball velo for a pitcher from the pre-fetched Savant dict.
-    Returns avg_velo with safe default when missing.
-    """
     row = savant_pitchers.get(pitcher_id, {})
     velo = row.get("effective_speed")
     return float(velo) if velo is not None and not pd.isna(velo) else 93.5
 
-
 # ── PITCHER WHIP FROM MLB STATS API ──────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_pitcher_season_whip(pitcher_id: int) -> float:
-    """Fetch current-season WHIP from the MLB Stats API (this field is reliably populated)."""
     et_now = datetime.now(tz=ZoneInfo("America/New_York"))
     season = et_now.year
     data = api_get(f"/people/{pitcher_id}/stats", stats="season", group="pitching", season=season)
@@ -132,10 +119,9 @@ def get_pitcher_season_whip(pitcher_id: int) -> float:
             whip = stat.get("whip")
             if whip:
                 return float(whip)
-    return 1.32  # fallback
+    return 1.32
 
-
-# ── PLAYER DATA FUNCTIONS ─────────────────────────────────────────────────────
+# ── PLAYER DATA FUNCTIONS ───────────────────────────────────────────────────── (rest of your script unchanged)
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
     data = api_get(f"/people/{player_id}")
@@ -188,11 +174,9 @@ def get_recent_batter_stats(batter_id):
             last_20_ab += ab
             last_20_hits += hits
         else:
-            # Use floor instead of round to avoid overcounting
             last_20_hits += int(hits * remaining / ab)
             last_20_ab += remaining
     last_20_str = f"{last_20_hits}-{last_20_ab}" if last_20_ab > 0 else "0-0"
-
     # Hitting streak
     current_streak = 0
     for game in games:
@@ -240,11 +224,6 @@ def calculate_hit_probability_v3(matchup_ba: float, recent_ba: float,
                                  batter_xba: float, batter_hard_hit_pct: float,
                                  batter_hand: str, pitcher_hand: str,
                                  batter_avg_ev: float) -> float:
-    """
-    Optimized AI Hit Probability Model v3.0
-    Weights: 30% xBA, 20% BvP, 15% recent form, 15% quality-of-contact,
-    8% WHIP, 5% velocity differential, 2% platoon
-    """
     base = (batter_xba * 0.30) + (matchup_ba * 0.20) + (recent_ba * 0.15)
     contact_adjust = ((batter_hard_hit_pct - 0.38) * 0.12) + ((batter_avg_ev - 88.5) * 0.008)
     whip_adjust = (1.32 - pitcher_whip) * 0.08
@@ -259,7 +238,7 @@ def calculate_hit_probability_v3(matchup_ba: float, recent_ba: float,
     prob = max(0.12, min(0.48, prob))
     return round(prob * 100, 1)
 
-# ── REMAINING ORIGINAL FUNCTIONS ──────────────────────────────────────────────
+# ── REMAINING ORIGINAL FUNCTIONS (unchanged from your script) ────────────────
 @st.cache_data(ttl=86400)
 def get_batter_vs_team(batter_id, opp_team_id):
     data = api_get(f"/people/{batter_id}/stats", stats="vsTeam",
@@ -360,14 +339,11 @@ def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, pit_team_id, 
     l_avg, l_ops, r_avg, r_ops = get_batter_vs_hand(bid)
     vs_team_avg, vs_team_ops = get_batter_vs_team(bid, pit_team_id)
     vs_bp_avg, vs_bp_ops = get_batter_vs_bullpen(bid, pit_team_id)
-
-    # Statcast from Baseball Savant (real per-player values)
+    # Statcast from Baseball Savant
     batter_xba, batter_hard_hit_pct, batter_avg_ev = get_batter_statcast(bid, savant_batters)
     pitcher_velo = get_pitcher_statcast(sp_id, savant_pitchers)
-
     # WHIP from MLB Stats API
     pitcher_whip = get_pitcher_season_whip(sp_id)
-
     # Parse matchup & recent BA
     matchup_ba = float(bvp.get("avg", 0.250))
     recent_ba = 0.265
@@ -379,7 +355,6 @@ def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, pit_team_id, 
             recent_ba = hits / ab if ab > 0 else 0.265
         except Exception:
             pass
-
     hit_prob = calculate_hit_probability_v3(
         matchup_ba=matchup_ba,
         recent_ba=recent_ba,
@@ -391,7 +366,6 @@ def process_batter(bname, bid, sp_name, sp_id, bat_team, pit_team, pit_team_id, 
         pitcher_hand=pitcher_hand,
         batter_avg_ev=batter_avg_ev
     )
-
     return {
         "Matchup": label,
         "Batter": bname,
@@ -428,19 +402,12 @@ def generate_bvp_dataframe():
     if not games:
         st.error(f"No games found for {game_date}.")
         return pd.DataFrame()
-
-    # Pre-fetch Savant leaderboards once — shared across all batters/pitchers
+    # Pre-fetch Savant leaderboards once
     with st.spinner("Loading Statcast data from Baseball Savant..."):
         savant_batters = fetch_savant_batter_data()
         savant_pitchers = fetch_savant_pitcher_data()
-
     savant_batter_count = len(savant_batters)
     savant_pitcher_count = len(savant_pitchers)
-    if savant_batter_count == 0:
-        st.warning("⚠️ Could not load batter Statcast data from Baseball Savant — xBA, Hard-Hit%, and Avg EV will use league-average defaults.")
-    if savant_pitcher_count == 0:
-        st.warning("⚠️ Could not load pitcher Statcast data from Baseball Savant — pitcher velo will use league-average default.")
-
     tasks = []
     pitcher_hand_cache = {}
     for g in games:
@@ -464,7 +431,6 @@ def generate_bvp_dataframe():
                     tasks.append((bname, bid, sp_name, sp_id,
                                   bat_team, pit_team, pit_team_id, label,
                                   pitcher_hand, savant_batters, savant_pitchers))
-
     progress_bar = st.progress(0)
     total = len(tasks)
     results = {}
@@ -481,18 +447,14 @@ def generate_bvp_dataframe():
                 pass
             completed += 1
             progress_bar.progress(min(completed / total, 1.0))
-
     df = pd.DataFrame(results.values())
     if not df.empty:
         df["AVG"] = pd.to_numeric(df["AVG"], errors="coerce")
         df = df[(df["AB"] > 10) & (df["AVG"] > 0.250)]
         df = df.sort_values(by="Est. Hit % (v3)", ascending=False).reset_index(drop=True)
-
-    # Show how many players had real Statcast data vs defaults
     if not df.empty and savant_batter_count > 0:
         real_xba = (df["xBA"] != 0.250).sum()
         st.info(f"📊 Statcast coverage: {real_xba}/{len(df)} batters matched in Baseball Savant leaderboard ({savant_batter_count} total in Savant, {savant_pitcher_count} pitchers).")
-
     return df
 
 # ── FETCH DATA ────────────────────────────────────────────────────────────────
@@ -507,7 +469,6 @@ batter_teams = sorted(data["Batter Team"].unique()) if not data.empty else []
 pitcher_teams = sorted(data["Pitcher Team"].unique()) if not data.empty else []
 batter_hands = sorted(data["Batter Hand"].unique()) if not data.empty else []
 pitcher_hands = sorted(data["Pitcher Hand"].unique()) if not data.empty else []
-
 selected_batter_team = st.sidebar.multiselect("Batter Team", options=batter_teams, default=[])
 selected_pitcher_team = st.sidebar.multiselect("Pitcher Team", options=pitcher_teams, default=[])
 selected_batter_hand = st.sidebar.multiselect("Batter Hand", options=batter_hands, default=[])
@@ -563,8 +524,8 @@ styled = filtered_data.style\
 st.dataframe(styled, use_container_width=True, hide_index=True, height=900)
 st.success(f"✅ Showing {len(filtered_data)} matchups (AB > 10 and AVG > .250) | AI Hit Probability v3.0 active")
 st.caption("""
-**Est. Hit % (v3)** = optimized probability using:  
-30% xBA + 20% BvP + 15% recent form + 15% hard-hit/exit velocity + 8% WHIP + 5% velocity differential + 2% platoon.  
-Statcast metrics (xBA, Hard-Hit%, Avg EV, Pitcher Velo) sourced from **Baseball Savant** leaderboard.  
+**Est. Hit % (v3)** = optimized probability using:
+30% xBA + 20% BvP + 15% recent form + 15% hard-hit/exit velocity + 8% WHIP + 5% velocity differential + 2% platoon.
+Statcast metrics sourced from **Baseball Savant** leaderboard.
 WHIP sourced from **MLB Stats API** current season.
 """)
