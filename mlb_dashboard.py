@@ -6,6 +6,7 @@ Statcast metrics (xBA, hard-hit%, avg EV, pitcher velo) pulled from Baseball Sav
 import streamlit as st
 import pandas as pd
 import requests
+import io                                      # ← Fixed StringIO error
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,7 +51,7 @@ def fetch_savant_batter_data():
     try:
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
-        df = pd.read_csv(pd.compat.StringIO(resp.text))
+        df = pd.read_csv(io.StringIO(resp.text))
         df = df.rename(columns={"player_id": "mlb_id"})
         df["mlb_id"] = pd.to_numeric(df["mlb_id"], errors="coerce").astype("Int64")
         if "hard_hit_percent" in df.columns:
@@ -81,7 +82,7 @@ def fetch_savant_pitcher_data():
     try:
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
-        df = pd.read_csv(pd.compat.StringIO(resp.text))
+        df = pd.read_csv(io.StringIO(resp.text))
         df = df.rename(columns={"player_id": "mlb_id"})
         df["mlb_id"] = pd.to_numeric(df["mlb_id"], errors="coerce").astype("Int64")
         if "effective_speed" in df.columns:
@@ -121,7 +122,7 @@ def get_pitcher_season_whip(pitcher_id: int) -> float:
                 return float(whip)
     return 1.32
 
-# ── PLAYER DATA FUNCTIONS ───────────────────────────────────────────────────── (rest of your script unchanged)
+# ── PLAYER DATA FUNCTIONS ─────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_player_handedness(player_id):
     data = api_get(f"/people/{player_id}")
@@ -238,7 +239,7 @@ def calculate_hit_probability_v3(matchup_ba: float, recent_ba: float,
     prob = max(0.12, min(0.48, prob))
     return round(prob * 100, 1)
 
-# ── REMAINING ORIGINAL FUNCTIONS (unchanged from your script) ────────────────
+# ── REMAINING ORIGINAL FUNCTIONS ──────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_batter_vs_team(batter_id, opp_team_id):
     data = api_get(f"/people/{batter_id}/stats", stats="vsTeam",
